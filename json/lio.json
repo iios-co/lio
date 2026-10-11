@@ -1,0 +1,56 @@
+{
+  "name": "Lio",
+  "slug": "lio",
+  "categories": [
+    20
+  ],
+  "date_created": "2026-10-11",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 8000,
+  "documentation": "https://github.com/iios-co/lio",
+  "website": "https://github.com/iios-co/lio",
+  "repository": "https://github.com/iios-co/lio",
+  "architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "platforms": [
+    "pve"
+  ],
+  "logo": "https://raw.githubusercontent.com/iios-co/lio/main/lio-plugin/public/icons/icon128.png",
+  "description": "Lio is a self-hostable, deterministic cross-browser bookmark and tab synchronization server. It preserves hierarchy, exact positioning, and active tab sessions across Chrome, Firefox, Edge, and Brave with an embedded web management console.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/lio.sh",
+      "config_path": "/etc/lio/lio.env",
+      "resources": {
+        "cpu": 2,
+        "ram": 1024,
+        "hdd": 4,
+        "os": "Debian",
+        "version": "13"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": "admin",
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Lio runs on port 8000 by default, serving both the sync API and the embedded Web Management Console (zero Node.js required on server).",
+      "type": "info"
+    },
+    {
+      "text": "First-run setup will prompt you to set an admin password upon opening the Web Console at http://<ip>:8000 (or via CLI `python -m lio_server --set-admin admin <password>`).",
+      "type": "info"
+    },
+    {
+      "text": "Designed for local LAN usage over HTTP out of the box (LIO_COOKIE_SECURE=0). WebSockets run natively on ws://.",
+      "type": "info"
+    }
+  ]
+}

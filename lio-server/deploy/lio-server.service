@@ -1,0 +1,33 @@
+[Unit]
+Description=Lio - Bookmark & Tab Sync Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lio
+Group=lio
+WorkingDirectory=/var/lib/lio
+EnvironmentFile=-/etc/lio/lio.env
+Environment=LIO_DB_PATH=/var/lib/lio/lio.db
+Environment=LIO_HOST=0.0.0.0
+Environment=LIO_PORT=8787
+Environment=LIO_DEADLINK_CHECK=1
+Environment=LIO_DEADLINK_ALLOW_PRIVATE=0
+ExecStart=/opt/lio/current/runtime/bin/python -m lio_server
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lio /etc/lio
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=1G
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
