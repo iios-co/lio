@@ -37,7 +37,7 @@ if ! fetch_and_deploy_gh_release "lio" "iios-co/lio" "tarball" 2>/dev/null; then
     rm -rf /opt/lio
     $STD git clone https://github.com/iios-co/lio.git /opt/lio
   fi
-  echo "v0.9.30" > ~/.lio
+  echo "v0.9.31" > ~/.lio
 fi
 python3 -m venv /opt/lio/runtime
 $STD /opt/lio/runtime/bin/pip install --upgrade pip setuptools wheel
