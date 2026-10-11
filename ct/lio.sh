@@ -91,9 +91,6 @@ function update_script() {
     # Validate new runtime can import cleanly
     /opt/lio-runtime.new/bin/python -c "import lio_server" || { msg_error "Failed to verify new Lio runtime"; exit 1; }
 
-    # Backup existing env before swap
-    cp -a /etc/lio/lio.env /etc/lio/lio.env.old 2>/dev/null || true
-
     # Atomically swap runtime
     rm -rf /opt/lio-runtime.old
     [[ -d /opt/lio-runtime ]] && mv /opt/lio-runtime /opt/lio-runtime.old
