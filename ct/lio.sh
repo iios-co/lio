@@ -39,26 +39,22 @@ function update_script() {
     msg_ok "Stopped Lio Service"
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "lio" "iios-co/lio" "tarball"
-    $STD /opt/lio/runtime/bin/pip install --upgrade /opt/lio/lio-server
+    python3 -m venv /opt/lio/runtime
+    $STD /opt/lio/runtime/bin/pip install --upgrade pip setuptools wheel
+    $STD /opt/lio/runtime/bin/pip install /opt/lio/lio-server
 
     msg_info "Starting Lio Service"
-    systemctl start lio-server
+    systemctl daemon-reload
+    systemctl restart lio-server
     msg_ok "Started Lio Service"
-    msg_ok "Updated successfully!"
-  elif [[ -d /opt/lio/.git ]]; then
-    msg_info "Stopping Lio Service"
-    systemctl stop lio-server
-    msg_ok "Stopped Lio Service"
 
-    msg_info "Updating Lio from Git"
-    cd /opt/lio
-    $STD git pull
-    $STD /opt/lio/runtime/bin/pip install --upgrade /opt/lio/lio-server
-    msg_ok "Updated Lio"
-
-    msg_info "Starting Lio Service"
-    systemctl start lio-server
-    msg_ok "Started Lio Service"
+    msg_info "Verifying Lio Health"
+    for _ in {1..20}; do
+      curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1 && break
+      sleep 1
+    done
+    curl -fsS http://127.0.0.1:8000/healthz >/dev/null || { msg_error "Lio health check failed after update"; exit 1; }
+    msg_ok "Lio is healthy"
     msg_ok "Updated successfully!"
   fi
   exit

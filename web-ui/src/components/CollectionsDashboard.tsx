@@ -59,13 +59,17 @@ export function CollectionsDashboard({ onLogout }: Props) {
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && newName.trim() && create.mutate(newName.trim())}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !create.isPending) {
+                create.mutate(newName.trim() || "Personal");
+              }
+            }}
             placeholder="New collection name — e.g. Personal, Work, Research"
             className="field flex-1 !bg-transparent !border-transparent"
           />
           <button
-            onClick={() => newName.trim() && create.mutate(newName.trim())}
-            disabled={!newName.trim() || create.isPending}
+            onClick={() => create.mutate(newName.trim() || "Personal")}
+            disabled={create.isPending}
             className="btn-primary"
           >
             {create.isPending ? "Creating…" : "Create"}
@@ -80,7 +84,14 @@ export function CollectionsDashboard({ onLogout }: Props) {
         {isError && <p className="text-red text-sm">{(error as Error).message}</p>}
         {!isLoading && collections.length === 0 && (
           <div className="glass rounded-2xl p-10 text-center text-fg-subtle text-sm">
-            No collections yet. Create your first one above.
+            <p className="mb-4 text-fg font-medium">No collections yet. Create your first collection to start syncing.</p>
+            <button
+              onClick={() => create.mutate("Personal")}
+              disabled={create.isPending}
+              className="btn-primary"
+            >
+              {create.isPending ? "Creating…" : "Create 'Personal' Collection"}
+            </button>
           </div>
         )}
 

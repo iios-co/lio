@@ -4,6 +4,8 @@
 # Author: rayone
 # License: MIT | https://github.com/community-scripts/DevScripts/raw/main/LICENSE
 # Source: https://github.com/iios-co/lio
+APP="Lio"
+app="lio"
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -12,7 +14,6 @@ catch_errors
 setting_up_container
 network_check
 update_os
-
 msg_info "Installing Dependencies"
 $STD apt install -y curl git tar sqlite3 ca-certificates python3 python3-venv python3-pip
 msg_ok "Installed Dependencies"
