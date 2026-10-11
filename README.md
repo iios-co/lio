@@ -153,10 +153,15 @@ The Lio browser extension synchronizes bookmarks and open tab sessions directly 
 | **Microsoft Edge** | [Edge Add-ons](https://microsoftedge.microsoft.com/addons/) | *Store Submission Pending* |
 | **Mozilla Firefox** | [Firefox Add-ons (AMO)](https://addons.mozilla.org/) | *AMO Review Pending* |
 
-Pre-packaged production release bundles (`lio-extension-chrome.zip` and `lio-extension-firefox.zip`) are compiled and published directly with each [GitHub Release](https://github.com/iios-co/lio/releases).
+Pre-packaged production release binaries and store archives are compiled and published directly with each [GitHub Release](https://github.com/iios-co/lio/releases):
 
-For enterprise administrators deploying via policy (MDM / GPO), configure `ExtensionSettings` or `ExtensionInstallForcelist` pointing to the packaged release artifact.
-
+- **`lio-extension.crx`** (Chromium CRX3 Package):
+  - **Brave / Chromium**: Drag and drop `lio-extension.crx` into the extensions page (`brave://extensions`) to install.
+  - **Google Chrome / Microsoft Edge**: Chrome policy restricts direct off-store `.crx` installation unless deployed via enterprise policy (`ExtensionSettings` / `ExtensionInstallForcelist`) or installed via the Chrome Web Store once listing review completes.
+- **`lio-extension.xpi`** (Firefox Add-on Package):
+  - Open `about:addons`, click the gear icon, and select **Install Add-on From File...** to select `lio-extension.xpi`. (Standard Firefox release requires AMO signing; Developer Edition / Nightly supports standalone installation).
+- **`lio-extension-chrome.zip`** & **`lio-extension-firefox.zip`**:
+  - Production upload archives ready for the Chrome Web Store and Mozilla Add-ons developer dashboards.
 #### Building Release Packages:
 ```bash
 cd lio-plugin

@@ -29,9 +29,19 @@ rm -f release/*.zip
   FIREFOX_ZIP=$(find .output -name '*-firefox.zip' -type f | head -n 1)
   [ -n "$CHROME_ZIP" ] && cp "$CHROME_ZIP" ../release/lio-extension-chrome.zip
   [ -n "$FIREFOX_ZIP" ] && cp "$FIREFOX_ZIP" ../release/lio-extension-firefox.zip
+  [ -n "$FIREFOX_ZIP" ] && cp "$FIREFOX_ZIP" ../release/lio-extension.xpi
+
+  # Pack native .crx extension binary if Chromium is available
+  CHROME_BIN=$(which chromium 2>/dev/null || which google-chrome 2>/dev/null || find "${HOME}/Library/Caches/ms-playwright" -name "Google Chrome for Testing" 2>/dev/null | head -n 1 || true)
+  if [ -n "$CHROME_BIN" ] && [ -x "$CHROME_BIN" ]; then
+    "$CHROME_BIN" --pack-extension="$(pwd)/.output/chrome-mv3" >/dev/null 2>&1 || true
+    if [ -f .output/chrome-mv3.crx ]; then
+      cp .output/chrome-mv3.crx ../release/lio-extension.crx
+    fi
+  fi
 )
 log "Packaged extension release artifacts:"
-ls -lh release/*.zip
+ls -lh release/*
 
 log "Configuring Git remote for ${REPO_OWNER}/${REPO_NAME}..."
 if ! git remote | grep -q '^origin$'; then
@@ -53,6 +63,7 @@ if [ -n "$TAG" ]; then
   fi
   if command -v gh >/dev/null 2>&1; then
     gh release create "$TAG" release/lio-extension-chrome.zip release/lio-extension-firefox.zip \
+      release/lio-extension.crx release/lio-extension.xpi \
       --title "Lio ${TAG}" \
       --notes "Production release of Lio with packaged browser extension bundles." || true
   fi
