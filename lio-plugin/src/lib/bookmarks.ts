@@ -222,10 +222,6 @@ async function dispatch(op: SyncOperation): Promise<void> {
   await browser.storage.local.set({ [LAST_LOCAL_CHANGE_KEY]: Date.now() });
   await enqueue(op);
   pushService.notifyLocalActivity();
-  const gate = await checkGate();
-  if (gate.state === "ok") {
-    void syncTransaction().catch(() => {});
-  }
 }
 
 /**
@@ -261,20 +257,46 @@ async function pushSiblingOrder(parentIds: (string | null | undefined)[]): Promi
     },
     lastServerVersion: cfg.lastServerVersion || 0,
   }));
-
   await enqueueBatch(ops);
   pushService.notifyLocalActivity();
-  const gate = await checkGate();
-  if (gate.state === "ok") {
-    void syncTransaction().catch(() => {});
-  }
 }
 
 type BNode = Browser.bookmarks.BookmarkTreeNode;
 
+let eventChain: Promise<void> = Promise.resolve();
+let syncRequester: (() => void) | null = null;
+let lastEventError: Error | null = null;
+
+export function setBookmarkSyncRequester(cb: () => void): void {
+  syncRequester = cb;
+}
+
+export function enqueueBookmarkEvent(fn: () => Promise<void>): Promise<void> {
+  eventChain = eventChain
+    .then(fn)
+    .catch((err) => {
+      lastEventError = err instanceof Error ? err : new Error(String(err));
+      console.error("Bookmark event handler error:", err);
+    })
+    .finally(() => {
+      if (syncRequester) syncRequester();
+    });
+  return eventChain;
+}
+
+export async function drainBookmarkEvents(): Promise<void> {
+  const current = eventChain;
+  await current;
+  if (lastEventError) {
+    const err = lastEventError;
+    lastEventError = null;
+    throw err;
+  }
+}
+
 export function onCreated(id: string, node: BNode): void {
   if (isApplyingRemote()) return;
-  void (async () => {
+  enqueueBookmarkEvent(async () => {
     if (!(await inSyncScope(id, node.parentId))) return;
     const op = await createSyncOp(id, "create", {
       parentId: node.parentId ?? null,
@@ -287,7 +309,7 @@ export function onCreated(id: string, node: BNode): void {
     });
     await dispatch(op);
     await pushSiblingOrder([node.parentId]);
-  })();
+  });
 }
 
 export function onChanged(
@@ -295,7 +317,7 @@ export function onChanged(
   changeInfo: { title?: string; url?: string }
 ): void {
   if (isApplyingRemote()) return;
-  void (async () => {
+  enqueueBookmarkEvent(async () => {
     const existing = await browser.bookmarks.get(id).catch(() => null);
     const parentId = existing && existing[0] ? existing[0].parentId : undefined;
     if (!(await inSyncScope(id, parentId))) return;
@@ -306,7 +328,7 @@ export function onChanged(
       dateModified: Date.now(),
     });
     await dispatch(op);
-  })();
+  });
 }
 
 export function onMoved(
@@ -314,7 +336,7 @@ export function onMoved(
   moveInfo: { parentId?: string; index?: number; oldParentId?: string; oldIndex?: number }
 ): void {
   if (isApplyingRemote()) return;
-  void (async () => {
+  enqueueBookmarkEvent(async () => {
     const inOld = await inSyncScope(id, moveInfo.oldParentId);
     const inNew = await inSyncScope(id, moveInfo.parentId);
     if (!inOld && !inNew) return;
@@ -324,17 +346,17 @@ export function onMoved(
     });
     await dispatch(op);
     await pushSiblingOrder([moveInfo.parentId, moveInfo.oldParentId]);
-  })();
+  });
 }
 
 export function onRemoved(id: string, removeInfo?: { parentId?: string }): void {
   if (isApplyingRemote()) return;
-  void (async () => {
+  enqueueBookmarkEvent(async () => {
     if (!(await inSyncScope(id, removeInfo?.parentId))) return;
     const op = await createSyncOp(id, "delete", {});
     await dispatch(op);
     await pushSiblingOrder([removeInfo?.parentId]);
-  })();
+  });
 }
 
 // ---- Full-tree reconciliation (the `resync` marker) ------------------------

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/server-logo.svg" width="128" height="128" alt="Lio Logo" />
+</p>
+
 # Lio
 
 > **Self-hostable, deterministic cross-browser bookmark and tab synchronization.**
@@ -252,7 +256,7 @@ cd lio-server && .venv/bin/python -m pytest
 # Web UI tests
 cd web-ui && npm test
 
-# Extension client tests
+# Extension client tests (69 unit and integration tests)
 cd lio-plugin && npm test
 
 # Full end-to-end acceptance harness (runs real Chrome against a throwaway server)
@@ -261,6 +265,6 @@ cd lio-plugin && npm test
 
 ---
 
-## License
+## License & Privacy
 
-MIT
+Released under the [MIT License](LICENSE). See [PRIVACY.md](PRIVACY.md) for data collection and transmission disclosures.

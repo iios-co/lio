@@ -6,7 +6,7 @@ import { isConfigured, getConfig, getSyncConfig, setConfig, setSyncConfig, setWa
 import {
   onCreated, onChanged, onMoved, onRemoved, syncTransaction,
   invalidateScopeCache, listFolders, fullPushInScope, inSyncScope, pushLocalOnlyNodes,
-  bootstrap,
+  bootstrap, drainBookmarkEvents, setBookmarkSyncRequester,
 } from "@/lib/bookmarks";
 import {
   diffTrees, describeDiff, linkCount, localNodes, folderNodes, serverNodes, type LeafRef,
@@ -19,6 +19,7 @@ import { checkGate, resetGate } from "@/lib/gate";
 import { api } from "@/lib/api";
 import { pushService } from "@/lib/push";
 
+import { SyncCoordinator } from "@/lib/syncCoordinator";
 const SYNC_ALARM = "lio-sync";
 // MV3 clamps alarms to a 1-minute floor; this is the real retry cadence and is
 // reported to the popup so the UI never states a number the code doesn't use.
@@ -47,6 +48,7 @@ export default defineBackground(() => {
     browser.windows.onCreated, browser.windows.onRemoved,
   ];
   for (const ev of tabEvents) ev.addListener(() => scheduleTabSync());
+
 
   async function ensureAlarm() {
     const existing = await browser.alarms.get(SYNC_ALARM);
@@ -143,9 +145,18 @@ export default defineBackground(() => {
     return syncPromise;
   }
 
+  const syncCoordinator = new SyncCoordinator(drainBookmarkEvents, runSync);
+  setBookmarkSyncRequester(() => {
+    void syncCoordinator.requestSync().catch((e) => {
+      console.error("Bookmark sync requester error:", e);
+    });
+  });
+
   browser.alarms.onAlarm.addListener((a) => {
     if (a.name === SYNC_ALARM) {
-      void runSync();
+      void syncCoordinator.requestSync().catch((e) => {
+        console.error("Alarm sync error:", e);
+      });
       if (!pushService.isConnected()) {
         void pushService.connect();
       }
@@ -160,7 +171,7 @@ export default defineBackground(() => {
     markSessionBoundary();
     scheduleTabSync();
     pushService.start(async () => {
-      await runSync();
+      await syncCoordinator.requestSync();
     });
   });
   browser.runtime.onStartup.addListener(() => {
@@ -170,12 +181,12 @@ export default defineBackground(() => {
     markSessionBoundary();
     scheduleTabSync();
     pushService.start(async () => {
-      await runSync();
+      await syncCoordinator.requestSync();
     });
   });
   void ensureAlarm();
   pushService.start(async () => {
-    await runSync();
+    await syncCoordinator.requestSync();
   });
 
   browser.runtime.onMessage.addListener((msg: {
@@ -432,13 +443,13 @@ export default defineBackground(() => {
             break;
           }
           case "SYNC_NOW": {
-            if (reconnecting && syncPromise) {
-              await syncPromise;
-            } else {
-              await runSync();
+            try {
+              await syncCoordinator.requestSync();
+              scheduleTabSync();
+              sendResponse({ ok: true });
+            } catch (e) {
+              sendResponse({ ok: false, error: (e as Error).message || String(e) });
             }
-            scheduleTabSync();
-            sendResponse({ ok: true });
             break;
           }
           case "FORCE_RECONCILE": {

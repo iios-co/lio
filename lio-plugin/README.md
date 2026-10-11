@@ -50,7 +50,12 @@ npm run zip:firefox  # Produces .output/lio-plugin-*-firefox.zip (Mozilla Add-on
 ---
 
 ## Testing
-
 ```bash
 npm test
 ```
+
+---
+
+## Privacy
+
+See [PRIVACY.md](../PRIVACY.md) for data collection, storage, and transmission disclosures. Data is strictly transmitted to the user's configured self-hosted server with zero third-party telemetry.

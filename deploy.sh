@@ -23,12 +23,14 @@ rm -f release/*.zip
 
 (
   cd lio-plugin
+  rm -rf .output
+  VERSION=$(node -p "require('./package.json').version")
   BUILD_BUMP=0 npm run zip
   BUILD_BUMP=0 npm run zip:firefox
-  CHROME_ZIP=$(find .output -name '*-chrome.zip' -type f | head -n 1)
-  FIREFOX_ZIP=$(find .output -name '*-firefox.zip' -type f | head -n 1)
-  [ -n "$CHROME_ZIP" ] && cp "$CHROME_ZIP" ../release/lio-extension-chrome.zip
-  [ -n "$FIREFOX_ZIP" ] && cp "$FIREFOX_ZIP" ../release/lio-extension-firefox.zip
+  [ -f ".output/lio-plugin-${VERSION}-chrome.zip" ] || die "Chrome bundle not found at .output/lio-plugin-${VERSION}-chrome.zip"
+  [ -f ".output/lio-plugin-${VERSION}-firefox.zip" ] || die "Firefox bundle not found at .output/lio-plugin-${VERSION}-firefox.zip"
+  cp ".output/lio-plugin-${VERSION}-chrome.zip" ../release/lio-extension-chrome.zip
+  cp ".output/lio-plugin-${VERSION}-firefox.zip" ../release/lio-extension-firefox.zip
 )
 log "Packaged extension release artifacts:"
 ls -lh release/*.zip

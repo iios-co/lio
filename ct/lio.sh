@@ -38,6 +38,14 @@ function update_script() {
     systemctl stop lio-server
     msg_ok "Stopped Lio Service"
 
+    cleanup_update() {
+      if ! systemctl is-active --quiet lio-server; then
+        msg_info "Attempting recovery: restarting Lio Service"
+        systemctl start lio-server 2>/dev/null || true
+      fi
+    }
+    trap cleanup_update EXIT
+
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "lio" "iios-co/lio" "tarball"
     python3 -m venv /opt/lio/runtime
     $STD /opt/lio/runtime/bin/pip install --upgrade pip setuptools wheel
@@ -54,10 +62,13 @@ function update_script() {
       sleep 1
     done
     curl -fsS http://127.0.0.1:8000/healthz >/dev/null || { msg_error "Lio health check failed after update"; exit 1; }
+    trap - EXIT
     msg_ok "Lio is healthy"
     msg_ok "Updated successfully!"
+  else
+    msg_ok "Lio is already up to date"
   fi
-  exit
+  exit 0
 }
 
 start

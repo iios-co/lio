@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="lioSquircleBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c0d14"/>
+      <stop offset="100%" stop-color="#050508"/>
+    </linearGradient>
+    <linearGradient id="lioLGrad" x1="0%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="40%" stop-color="#0084ff"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="lioOGrad" x1="0%" y1="20%" x2="100%" y2="80%">
+      <stop offset="0%" stop-color="#0084ff"/>
+      <stop offset="60%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="lioDotGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00c6ff"/>
+      <stop offset="100%" stop-color="#0072ff"/>
+    </linearGradient>
+    <filter id="lioGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect x="16" y="16" width="480" height="480" rx="110" ry="110" fill="url(#lioSquircleBg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="110" ry="110" stroke="#1f2233" stroke-width="3" fill="none"/>
+
+  <!-- Logo Mark -->
+  <g filter="url(#lioGlow)">
+    <path d="M 100 80 L 100 375 A 55 55 0 0 0 155 430 L 270 430"
+          stroke="url(#lioLGrad)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M 235 185 A 115 115 0 1 1 228 275"
+          stroke="url(#lioOGrad)" stroke-width="54" stroke-linecap="round" fill="none"/>
+    <circle cx="325" cy="240" r="38" fill="url(#lioDotGrad)"/>
+  </g>
+</svg>

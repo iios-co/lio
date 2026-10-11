@@ -39,7 +39,7 @@ step "web-ui tests"      bash -c 'cd web-ui && npm test --silent'
 # ---- builds (must produce loadable artefacts, not just typecheck) ---------
 
 step "web-ui build"      bash -c 'cd web-ui && npm run build'
-step "extension build"   bash -c 'cd lio-plugin && npm run build'
+step "extension build"   bash -c 'cd lio-plugin && BUILD_BUMP=0 npm run build'
 
 # ---- end-to-end against a real browser -----------------------------------
 
