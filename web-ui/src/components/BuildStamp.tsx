@@ -15,7 +15,7 @@ export function BuildStamp() {
   });
   return (
     <span className="text-[11px] text-fg-subtle font-mono whitespace-nowrap">
-      server v{data ?? "…"} · ui {__UI_BUILD__}
+      server {data?.display ?? "…"}
     </span>
   );
 }

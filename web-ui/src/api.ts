@@ -55,13 +55,17 @@ async function adminReq<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const admin = {
-  version: async (): Promise<string> => {
+  version: async (): Promise<{ version: string; sha: string; display: string }> => {
     try {
       const r = await fetch("/version");
-      const j = (await r.json()) as { version?: string };
-      return j.version ?? "?";
+      const j = (await r.json()) as { version?: string; sha?: string; display?: string };
+      return {
+        version: j.version ?? "unknown",
+        sha: j.sha ?? "unknown",
+        display: j.display ?? `v${j.version ?? "unknown"}`,
+      };
     } catch {
-      return "?";
+      return { version: "unknown", sha: "unknown", display: "unknown" };
     }
   },
   state: () =>

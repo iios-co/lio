@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import db, events
 from .config import Settings
 from .routes import admin, bookmarks, collection, reports, tabs
-from . import __version__, get_version
+from . import __version__, get_version, get_version_info
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -67,8 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/version", tags=["meta"])
     def version() -> dict[str, str]:
-        return {"version": get_version()}
-
+        return get_version_info()
     app.include_router(bookmarks.router)
     app.include_router(tabs.router)
     app.include_router(reports.router)

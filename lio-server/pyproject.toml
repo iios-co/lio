@@ -1,6 +1,6 @@
 [project]
 name = "lio-server"
-version = "0.9.31"
+dynamic = ["version"]
 description = "Self-hostable bookmark and tab synchronization server for Lio"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,8 +23,12 @@ dev = [
 lio-server = "lio_server.__main__:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0", "hatch-vcs==0.5.0"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "..", fallback_root = "." }
 
 [tool.hatch.build.targets.wheel]
 packages = ["lio_server"]

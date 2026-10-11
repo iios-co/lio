@@ -30,19 +30,44 @@ chown -R lio:lio /var/lib/lio /etc/lio
 msg_ok "Configured Directories"
 
 msg_info "Setting up Lio Server"
-if ! fetch_and_deploy_gh_release "lio" "iios-co/lio" "tarball" 2>/dev/null; then
+SOURCE_KIND=""
+if fetch_and_deploy_gh_release "lio" "iios-co/lio" "tarball" 2>/dev/null; then
+  SOURCE_KIND="release"
+else
+  SOURCE_KIND="git"
   if [[ -d /opt/lio/.git ]]; then
     cd /opt/lio && $STD git pull
   else
     rm -rf /opt/lio
     $STD git clone https://github.com/iios-co/lio.git /opt/lio
   fi
-  echo "v0.9.31" > ~/.lio
 fi
-python3 -m venv /opt/lio/runtime
-$STD /opt/lio/runtime/bin/pip install --upgrade pip setuptools wheel
-$STD /opt/lio/runtime/bin/pip install /opt/lio/lio-server
-msg_ok "Set up Lio Server"
+
+RELEASE_TAG=""
+FULL_SHA=""
+if [[ "$SOURCE_KIND" == "release" ]]; then
+  RELEASE_TAG=$(cat ~/.lio 2>/dev/null || true)
+  if [[ -n "$RELEASE_TAG" ]]; then
+    FULL_SHA=$(git ls-remote https://github.com/iios-co/lio.git "refs/tags/${RELEASE_TAG}^{}" "refs/tags/${RELEASE_TAG}" 2>/dev/null | awk -v tag="$RELEASE_TAG" '$2 == "refs/tags/"tag"^{}" {print $1; found=1; exit} $2 == "refs/tags/"tag {fallback=$1} END {if (!found) print fallback}')
+  fi
+elif [[ "$SOURCE_KIND" == "git" ]] && [[ -d /opt/lio/.git ]]; then
+  RELEASE_TAG=$(cd /opt/lio && git describe --tags --always 2>/dev/null || echo "git-main")
+  FULL_SHA=$(cd /opt/lio && git rev-parse HEAD 2>/dev/null || true)
+fi
+
+[[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]] || { msg_error "Could not resolve valid 40-hex commit SHA from GitHub"; exit 1; }
+[ -n "$RELEASE_TAG" ] || { msg_error "Could not resolve release tag from GitHub"; exit 1; }
+RELEASE_SHA="${FULL_SHA:0:12}"
+
+python3 -m venv /opt/lio-runtime
+ln -sfn /opt/lio-runtime /opt/lio/runtime
+$STD /opt/lio-runtime/bin/pip install --upgrade pip setuptools wheel
+if [[ "$SOURCE_KIND" == "release" ]]; then
+  $STD env SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIO_SERVER="${RELEASE_TAG#v}" /opt/lio-runtime/bin/pip install /opt/lio/lio-server
+else
+  $STD /opt/lio-runtime/bin/pip install /opt/lio/lio-server
+fi
+msg_ok "Set up Lio Server (${RELEASE_TAG} - ${RELEASE_SHA})"
 
 msg_info "Configuring Lio Environment"
 cat <<EOF >/etc/lio/lio.env
@@ -52,6 +77,8 @@ LIO_PORT=8000
 LIO_DEADLINK_CHECK=1
 LIO_DEADLINK_ALLOW_PRIVATE=0
 LIO_COOKIE_SECURE=0
+LIO_RELEASE_VERSION=${RELEASE_TAG}
+LIO_RELEASE_SHA=${RELEASE_SHA}
 EOF
 chmod 640 /etc/lio/lio.env
 chown root:lio /etc/lio/lio.env
@@ -73,7 +100,7 @@ User=lio
 Group=lio
 WorkingDirectory=/var/lib/lio
 EnvironmentFile=/etc/lio/lio.env
-ExecStart=/opt/lio/runtime/bin/python -m lio_server
+ExecStart=/opt/lio-runtime/bin/python -m lio_server
 Restart=always
 RestartSec=3
 LimitNOFILE=65536

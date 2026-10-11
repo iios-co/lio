@@ -42,6 +42,25 @@ def test_healthz(client):
     assert client.get("/healthz").json() == {"status": "ok"}
 
 
+def test_version_endpoint_with_release_identity(monkeypatch, client):
+    monkeypatch.setenv("LIO_RELEASE_VERSION", "v0.9.32")
+    monkeypatch.setenv("LIO_RELEASE_SHA", "0e49f3f58903")
+    r = client.get("/version")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["version"] == "0.9.32"
+    assert data["sha"] == "0e49f3f58903"
+    assert data["display"] == "v0.9.32 (0e49f3f58903)"
+
+
+def test_version_endpoint_with_malformed_env(monkeypatch, client):
+    monkeypatch.setenv("LIO_RELEASE_VERSION", "")
+    monkeypatch.setenv("LIO_RELEASE_SHA", "not-a-hex-sha")
+    r = client.get("/version")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["sha"] == "unknown"
+
 def test_auth_required(client):
     r = client.get(f"{_base()}/bookmarks/tree")
     assert r.status_code == 401
