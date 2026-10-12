@@ -190,7 +190,10 @@ test("pasting pairing code populates and persists both endpoint and token", asyn
     endpoint: "http://10.0.5.213:8000",
     token: "col_live999",
   });
-
+  assert.equal(
+    code,
+    "lio-connect:v1:eyJlbmRwb2ludCI6Imh0dHA6Ly8xMC4wLjUuMjEzOjgwMDAiLCJ0b2tlbiI6ImNvbF9saXZlOTk5In0"
+  );
   // Simulate paste interceptor logic
   const parsed = parseConnectionString(code);
   assert.ok(parsed);

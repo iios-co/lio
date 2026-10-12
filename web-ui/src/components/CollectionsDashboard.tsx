@@ -332,6 +332,7 @@ function PencilIcon() { return <svg {..._ic}><path d="M12 20h9" /><path d="M16.5
 function TokenReveal({ name, token, onClose }: { name: string; token: string; onClose: () => void }) {
   const [copiedToken, setCopiedToken] = useState(false);
   const [copiedPairing, setCopiedPairing] = useState(false);
+  const [copyError, setCopyError] = useState("");
 
   const pairingCode = useMemo(() => {
     try {
@@ -342,18 +343,29 @@ function TokenReveal({ name, token, onClose }: { name: string; token: string; on
   }, [token]);
 
   const copyToken = async () => {
-    await navigator.clipboard?.writeText(token);
-    setCopiedToken(true);
-    setTimeout(() => setCopiedToken(false), 2000);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(token);
+      setCopyError("");
+      setCopiedToken(true);
+      setTimeout(() => setCopiedToken(false), 2000);
+    } catch {
+      setCopyError("Could not write to clipboard. Copy the field manually.");
+    }
   };
 
   const copyPairing = async () => {
     if (!pairingCode) return;
-    await navigator.clipboard?.writeText(pairingCode);
-    setCopiedPairing(true);
-    setTimeout(() => setCopiedPairing(false), 2000);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(pairingCode);
+      setCopyError("");
+      setCopiedPairing(true);
+      setTimeout(() => setCopiedPairing(false), 2000);
+    } catch {
+      setCopyError("Could not write to clipboard. Copy the field manually.");
+    }
   };
-
   return (
     <div className="mb-6 card p-4 fade-up" style={{ boxShadow: "0 0 30px rgba(122,162,247,0.3)" }}>
       <div className="flex items-center justify-between mb-2">
@@ -375,6 +387,7 @@ function TokenReveal({ name, token, onClose }: { name: string; token: string; on
           </button>
         )}
       </div>
+      {copyError && <p className="text-xs text-red mt-2">{copyError}</p>}
     </div>
   );
 }
