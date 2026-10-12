@@ -77,7 +77,7 @@ python3 -m venv /opt/lio-runtime
 ln -sfn /opt/lio-runtime /opt/lio/runtime
 $STD /opt/lio-runtime/bin/pip install --upgrade pip setuptools wheel
 if [[ "$SOURCE_KIND" == "release" ]]; then
-  $STD env SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIO_SERVER="${CLEAN_VER}" /opt/lio-runtime/bin/pip install /opt/lio/lio-server
+  $STD env SETUPTOOLS_SCM_PRETEND_VERSION="${CLEAN_VER}" VCS_VERSIONING_PRETEND_VERSION="${CLEAN_VER}" /opt/lio-runtime/bin/pip install /opt/lio/lio-server
 else
   $STD /opt/lio-runtime/bin/pip install /opt/lio/lio-server
 fi

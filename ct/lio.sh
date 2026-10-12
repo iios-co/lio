@@ -98,7 +98,7 @@ function update_script() {
     rm -rf /opt/lio-runtime.new
     python3 -m venv /opt/lio-runtime.new
     $STD /opt/lio-runtime.new/bin/pip install --upgrade pip setuptools wheel
-    $STD env SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIO_SERVER="${CLEAN_VER}" /opt/lio-runtime.new/bin/pip install --upgrade /opt/lio/lio-server
+    $STD env SETUPTOOLS_SCM_PRETEND_VERSION="${CLEAN_VER}" VCS_VERSIONING_PRETEND_VERSION="${CLEAN_VER}" /opt/lio-runtime.new/bin/pip install --upgrade /opt/lio/lio-server
 
     # Validate new runtime can import cleanly
     /opt/lio-runtime.new/bin/python -c "import lio_server" || { msg_error "Failed to verify new Lio runtime"; exit 1; }
