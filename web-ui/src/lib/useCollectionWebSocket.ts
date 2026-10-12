@@ -28,7 +28,11 @@ export function useCollectionWebSocket(token: string | null | undefined): void {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data?.event === "bookmarks_updated") {
+            if (data?.event === "connected") {
+              qc.invalidateQueries({ queryKey: ["usage", token] });
+              qc.invalidateQueries({ queryKey: ["sessions", token] });
+              qc.invalidateQueries({ queryKey: ["collections"] });
+            } else if (data?.event === "bookmarks_updated") {
               qc.invalidateQueries({ queryKey: ["usage", token] });
               qc.invalidateQueries({ queryKey: ["collections"] });
             } else if (data?.event === "tabs_updated") {
