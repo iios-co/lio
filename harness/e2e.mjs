@@ -188,7 +188,17 @@ try {
   await msg({ type: "SET_CONNECTION", endpoint: BASE, token });
   check("extension: refuse an invalid token instead of saving it", badSet?.ok === false, `ok=${badSet?.ok}`);
 
-  // 5. Sync everything, then push local -> server.
+  // 5. Open dashboard in browser BEFORE initial sync
+  const dashPage = await ctx.newPage();
+  const [cName, cVal] = cookie.split("=");
+  await ctx.addCookies([{ name: cName, value: cVal, domain: "127.0.0.1", path: "/" }]);
+  await dashPage.goto(`${BASE}/`);
+  await dashPage.waitForSelector("text=Collections");
+  const preText = await dashPage.innerText("body");
+  const preCountMatch = /BOOKMARKS\s*(\d+)/i.exec(preText);
+  const preCount = preCountMatch ? parseInt(preCountMatch[1], 10) : 0;
+
+  // Sync everything, then push local -> server.
   await msg({ type: "ADD_PAIR", pair: { id: "p1", type: "bookmark", localFolderId: "", localFolderName: "Everything", collectionPath: "/", enabled: true } });
   await msg({ type: "SYNC_NOW" });
   await sleep(3000);
@@ -200,6 +210,20 @@ try {
     (tree.json?.nodes ?? []).some((n) => n.title === "Nested One" && n.parent_id === "13"),
     "nested link kept its parent");
 
+  // Live dashboard verification: assert card updated without reload
+  let liveCount = 0;
+  for (let i = 0; i < 20; i++) {
+    const postText = await dashPage.innerText("body");
+    const m = /BOOKMARKS\s*(\d+)/i.exec(postText);
+    if (m) {
+      liveCount = parseInt(m[1], 10);
+      if (liveCount === 6) break;
+    }
+    await sleep(250);
+  }
+  check("dashboard: card count updates live on first sync (0 -> 6) without reload",
+    preCount === 0 && liveCount === 6, `pre=${preCount} live=${liveCount}`);
+  await dashPage.close();
   // 6. Local create / rename / move / delete must reach the server.
   const newId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "1", title: "Gamma", url: "https://gamma.example/" })).id);
   await extPage.evaluate(async () => { await chrome.bookmarks.update("11", { title: "Beta Renamed" }); });
