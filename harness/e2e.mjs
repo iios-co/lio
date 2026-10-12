@@ -174,21 +174,7 @@ try {
   check("extension: check the gate before any network action",
     preGate?.gateState === "unconfigured", `gateState=${preGate?.gateState}`);
 
-  // 4. Hold connection config, verified before saving.
-  const set = await msg({ type: "SET_CONNECTION", endpoint: BASE, token });
-  const cfg = await msg({ type: "STATUS" });
-  check("extension: hold the connection config (endpoint, token, device identity)",
-    set?.ok === true && cfg?.endpoint === BASE && cfg?.token === token && !!cfg?.deviceId,
-    `device=${cfg?.deviceId?.slice(0, 12)}`);
-  check("extension: gate opens once reachable with a valid token",
-    cfg?.gateState === "ok", `gateState=${cfg?.gateState}`);
-
-  // A bad token must be refused, not accepted.
-  const badSet = await msg({ type: "SET_CONNECTION", endpoint: BASE, token: "0000000000000000" });
-  await msg({ type: "SET_CONNECTION", endpoint: BASE, token });
-  check("extension: refuse an invalid token instead of saving it", badSet?.ok === false, `ok=${badSet?.ok}`);
-
-  // 5. Open dashboard in browser BEFORE initial sync
+  // 4. Open dashboard in browser BEFORE onboarding connection
   const dashPage = await ctx.newPage();
   const [cName, cVal] = cookie.split("=");
   await ctx.addCookies([{ name: cName, value: cVal, domain: "127.0.0.1", path: "/" }]);
@@ -198,9 +184,28 @@ try {
   const preCountMatch = /BOOKMARKS\s*(\d+)/i.exec(preText);
   const preCount = preCountMatch ? parseInt(preCountMatch[1], 10) : 0;
 
-  // Sync everything, then push local -> server.
-  await msg({ type: "ADD_PAIR", pair: { id: "p1", type: "bookmark", localFolderId: "", localFolderName: "Everything", collectionPath: "/", enabled: true } });
-  await msg({ type: "SYNC_NOW" });
+  // A bad token must be refused, not accepted.
+  const badSet = await msg({ type: "SET_CONNECTION", endpoint: BASE, token: "0000000000000000", bootstrapMode: "merge" });
+  check("extension: refuse an invalid token instead of saving it", badSet?.ok === false, `ok=${badSet?.ok}`);
+
+  // Real onboarding connection: sets endpoint, token, and triggers bootstrap
+  const set = await msg({ type: "SET_CONNECTION", endpoint: BASE, token, bootstrapMode: "merge" });
+  const cfg = await msg({ type: "STATUS" });
+  check("extension: hold the connection config (endpoint, token, device identity)",
+    set?.ok === true && cfg?.endpoint === BASE && cfg?.token === token && !!cfg?.deviceId,
+    `device=${cfg?.deviceId?.slice(0, 12)}`);
+  check("extension: gate opens once reachable with a valid token",
+    cfg?.gateState === "ok", `gateState=${cfg?.gateState}`);
+
+  // Onboarding must auto-provision the default "Everything" bookmark sync pair
+  const initSync = await msg({ type: "GET_SYNC_CONFIG" });
+  const defaultPair = initSync?.sync?.pairs?.find((p) => p.type === "bookmark" && p.enabled);
+  const defaultPairId = defaultPair?.id;
+  check("onboarding: auto-provisions default Everything bookmark sync pair",
+    !!defaultPair && defaultPair.localFolderName === "Everything",
+    `id=${defaultPairId} pairs=${initSync?.sync?.pairs?.length}`);
+
+  // Wait for bootstrap sync to complete
   await sleep(3000);
   let tree = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
   const serverLinks = (tree.json?.nodes ?? []).filter((n) => !n.is_folder);
@@ -210,7 +215,7 @@ try {
     (tree.json?.nodes ?? []).some((n) => n.title === "Nested One" && n.parent_id === "13"),
     "nested link kept its parent");
 
-  // Live dashboard verification: assert card updated without reload
+  // Live dashboard verification: assert card updated live from 0 -> 6 without reload
   let liveCount = 0;
   for (let i = 0; i < 20; i++) {
     const postText = await dashPage.innerText("body");
@@ -485,11 +490,11 @@ try {
   // scope and nothing is queued), add a bookmark, re-enable, then sync.
   // TOGGLE_PAIR deliberately does NOT trigger a full push, so this isolates the
   // repair step rather than testing fullPushInScope.
-  await msg({ type: "TOGGLE_PAIR", pairId: "p1", enabled: false });
+  await msg({ type: "TOGGLE_PAIR", pairId: defaultPairId, enabled: false });
   await sleep(600);
   const orphanId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "1", title: "MissedCreate", url: "https://missed.example/" })).id);
   await sleep(1200);
-  await msg({ type: "TOGGLE_PAIR", pairId: "p1", enabled: true });
+  await msg({ type: "TOGGLE_PAIR", pairId: defaultPairId, enabled: true });
   await sleep(600);
   const beforeRepair = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
   const knownBefore = new Set((beforeRepair.json?.nodes ?? []).map((n) => n.id)).has(orphanId);
@@ -522,7 +527,7 @@ try {
 
   // 18. Sync pairs must LIMIT scope: a node outside the pair folder must not sync.
   // Swap the "everything" pair for one scoped to the "Work" folder (id 13).
-  await msg({ type: "REMOVE_PAIR", pairId: "p1" });
+  await msg({ type: "REMOVE_PAIR", pairId: defaultPairId });
   await msg({ type: "ADD_PAIR", pair: { id: "p2", type: "bookmark", localFolderId: "13", localFolderName: "Work", collectionPath: "/Work", enabled: true } });
   await sleep(1500);
   const inScopeId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "13", title: "InScope", url: "https://inscope.example/" })).id);
@@ -535,8 +540,59 @@ try {
   check("extension: limit what syncs via sync pairs (folder scope)",
     scopedIds.has(inScopeId) && !scopedIds.has(outScopeId),
     `inScope=${scopedIds.has(inScopeId)} outOfScope-leaked=${scopedIds.has(outScopeId)}`);
+  // 19. Fresh device test: 0 local bookmarks merging with nonempty server collection
+  const freshProfile = path.join(SCRATCH, `e2e_fresh_${Date.now()}`);
+  fs.mkdirSync(freshProfile, { recursive: true });
+  const freshCtx = await chromium.launchPersistentContext(freshProfile, {
+    args: [
+      `--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
+      "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+      "--no-first-run", "--no-default-browser-check",
+    ],
+    headless: false, timeout: 60000,
+    colorScheme: "dark",
+  });
 
+  try {
+    const freshSw = freshCtx.serviceWorkers()[0] ?? await freshCtx.waitForEvent("serviceworker", { timeout: 25000 });
+    const freshExtId = new URL(freshSw.url()).host;
+    const freshExtPage = await freshCtx.newPage();
+    await freshExtPage.goto(`chrome-extension://${freshExtId}/popup.html`, { waitUntil: "domcontentloaded" });
+    const freshMsg = (m) => freshExtPage.evaluate((mm) => chrome.runtime.sendMessage(mm), m);
 
+    // Capture server count BEFORE fresh device connects
+    const serverTreeBefore = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
+    const serverLinksBefore = (serverTreeBefore.json?.nodes ?? []).filter((n) => !n.is_folder).length;
+
+    // Fresh browser has 0 links
+    const freshTreeBefore = await freshExtPage.evaluate(async () => {
+      const out = [];
+      const walk = (n) => (n.children ?? []).forEach((c) => { if (c.url) out.push(c); walk(c); });
+      walk((await chrome.bookmarks.getTree())[0]);
+      return out;
+    });
+
+    const freshSet = await freshMsg({ type: "SET_CONNECTION", endpoint: BASE, token, bootstrapMode: "merge" });
+    await sleep(4000);
+
+    const freshTreeAfter = await freshExtPage.evaluate(async () => {
+      const out = [];
+      const walk = (n) => (n.children ?? []).forEach((c) => { if (c.url) out.push(c); walk(c); });
+      walk((await chrome.bookmarks.getTree())[0]);
+      return out;
+    });
+    const serverTreeAfter = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
+    const serverLinksAfter = (serverTreeAfter.json?.nodes ?? []).filter((n) => !n.is_folder).length;
+
+    check("fresh device: 0 local links merged with nonempty server pulls all links intact",
+      freshSet?.ok === true && freshTreeBefore.length === 0 &&
+      serverLinksBefore > 0 && serverLinksAfter === serverLinksBefore &&
+      freshTreeAfter.length === serverLinksBefore,
+      `serverBefore=${serverLinksBefore} freshAfter=${freshTreeAfter.length} serverAfter=${serverLinksAfter}`);
+  } finally {
+    await freshCtx.close().catch(() => {});
+    fs.rmSync(freshProfile, { recursive: true, force: true });
+  }
 } catch (e) {
   check("harness ran to completion", false, e.message?.split("\n")[0]);
 } finally {

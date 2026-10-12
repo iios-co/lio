@@ -49,6 +49,34 @@ const DEFAULTS: LioConfig = {
 
 const SYNC_DEFAULTS: SyncConfig = { globalEnabled: true, pairs: [] };
 
+export function ensureOnboardingBookmarkPair(
+  syncCfg: SyncConfig,
+  isOnboarding: boolean
+): { sync: SyncConfig; provisioned: boolean } {
+  if (!isOnboarding) {
+    return { sync: syncCfg, provisioned: false };
+  }
+  const hasBookmarkPair = syncCfg.pairs.some((p) => p.type === "bookmark");
+  if (hasBookmarkPair) {
+    return { sync: syncCfg, provisioned: false };
+  }
+  const defaultPair: SyncPair = {
+    id: "p_everything",
+    type: "bookmark",
+    localFolderId: "",
+    localFolderName: "Everything",
+    collectionPath: "/",
+    enabled: true,
+  };
+  return {
+    sync: {
+      globalEnabled: true,
+      pairs: [...syncCfg.pairs, defaultPair],
+    },
+    provisioned: true,
+  };
+}
+
 const KEYS = Object.keys(DEFAULTS) as (keyof LioConfig)[];
 const SYNC_KEY = "syncConfig";
 

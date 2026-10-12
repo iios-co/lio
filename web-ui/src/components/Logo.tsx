@@ -8,7 +8,6 @@ export function Logo({
   withWordmark?: boolean;
 }) {
   const id = useId().replace(/:/g, "_");
-  const bgId = `lio-bg-${id}`;
   const lGradId = `lio-lgrad-${id}`;
   const oGradId = `lio-ograd-${id}`;
   const dotGradId = `lio-dotgrad-${id}`;
@@ -26,10 +25,6 @@ export function Logo({
         className="shrink-0"
       >
         <defs>
-          <linearGradient id={bgId} x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#0c0d14" />
-            <stop offset="100%" stopColor="#050508" />
-          </linearGradient>
           <linearGradient id={lGradId} x1="0%" y1="0%" x2="50%" y2="100%">
             <stop offset="0%" stopColor="#00d2ff" />
             <stop offset="40%" stopColor="#0084ff" />
@@ -53,8 +48,6 @@ export function Logo({
           </filter>
         </defs>
 
-        <rect x="16" y="16" width="480" height="480" rx="110" ry="110" fill={`url(#${bgId})`} />
-        <rect x="16" y="16" width="480" height="480" rx="110" ry="110" stroke="#1f2233" strokeWidth="4" fill="none" />
 
         <g filter={`url(#${glowId})`}>
           <path

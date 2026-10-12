@@ -2,7 +2,7 @@
 // a periodic sync alarm (pull remote deltas + flush queue + flush visits), and
 // answers messages from the popup.
 
-import { isConfigured, getConfig, getSyncConfig, setConfig, setSyncConfig, setWatermark, type SyncPair } from "@/lib/config";
+import { isConfigured, getConfig, getSyncConfig, setConfig, setSyncConfig, setWatermark, ensureOnboardingBookmarkPair, type SyncPair } from "@/lib/config";
 import {
   onCreated, onChanged, onMoved, onRemoved, syncTransaction,
   invalidateScopeCache, listFolders, fullPushInScope, inSyncScope, pushLocalOnlyNodes,
@@ -395,9 +395,16 @@ export default defineBackground(() => {
               sendResponse({ ok: false, error });
               break;
             }
-            const mode = msg.bootstrapMode === "server" || msg.bootstrapMode === "browser"
-              ? msg.bootstrapMode : "merge";
+            const isOnboarding = msg.bootstrapMode === "merge" || msg.bootstrapMode === "server" || msg.bootstrapMode === "browser";
+            const mode = isOnboarding ? msg.bootstrapMode : "merge";
             await setConfig({ endpoint, token, bootstrapMode: mode });
+
+            const syncCfg = await getSyncConfig();
+            const { sync: nextSync, provisioned } = ensureOnboardingBookmarkPair(syncCfg, isOnboarding);
+            if (provisioned) {
+              await setSyncConfig(nextSync);
+            }
+
             await log({
               kind: "info",
               title: `Connected to ${collectionName ?? "collection"}`,
