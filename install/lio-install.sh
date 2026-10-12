@@ -47,23 +47,22 @@ RELEASE_TAG=""
 RELEASE_SHA="unknown"
 if [[ "$SOURCE_KIND" == "release" ]]; then
   RAW_TAG=$(cat ~/.lio 2>/dev/null || true)
-  if [[ -n "$RAW_TAG" ]]; then
-    RELEASE_TAG="v${RAW_TAG#v}"
-    CLEAN_VER="${RAW_TAG#v}"
-    FULL_SHA=$(git ls-remote https://github.com/iios-co/lio.git \
-      "refs/tags/${RELEASE_TAG}^{}" "refs/tags/${RELEASE_TAG}" \
-      "refs/tags/${CLEAN_VER}^{}" "refs/tags/${CLEAN_VER}" 2>/dev/null | awk -v tag="$RELEASE_TAG" -v ctag="$CLEAN_VER" '
-      $2 == "refs/tags/"tag"^{}" || $2 == "refs/tags/"ctag"^{}" {print $1; found=1; exit}
-      $2 == "refs/tags/"tag || $2 == "refs/tags/"ctag {fallback=$1}
-      END {if (!found) print fallback}')
-    if [[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-      RELEASE_SHA="${FULL_SHA:0:12}"
-    else
-      msg_warn "Could not resolve commit SHA from GitHub; proceeding with release ${RELEASE_TAG}"
-    fi
+  if [[ -z "$RAW_TAG" ]]; then
+    msg_error "Could not resolve release tag from ~/.lio"
+    exit 1
+  fi
+  RELEASE_TAG="v${RAW_TAG#v}"
+  CLEAN_VER="${RAW_TAG#v}"
+  FULL_SHA=$(git ls-remote https://github.com/iios-co/lio.git \
+    "refs/tags/${RELEASE_TAG}^{}" "refs/tags/${RELEASE_TAG}" \
+    "refs/tags/${CLEAN_VER}^{}" "refs/tags/${CLEAN_VER}" 2>/dev/null | awk -v tag="$RELEASE_TAG" -v ctag="$CLEAN_VER" '
+    $2 == "refs/tags/"tag"^{}" || $2 == "refs/tags/"ctag"^{}" {print $1; found=1; exit}
+    $2 == "refs/tags/"tag || $2 == "refs/tags/"ctag {fallback=$1}
+    END {if (!found) print fallback}')
+  if [[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    RELEASE_SHA="${FULL_SHA:0:12}"
   else
-    RELEASE_TAG="unknown"
-    CLEAN_VER="0.0.0"
+    msg_warn "Could not resolve commit SHA from GitHub; proceeding with release ${RELEASE_TAG}"
   fi
 elif [[ "$SOURCE_KIND" == "git" ]] && [[ -d /opt/lio/.git ]]; then
   RELEASE_TAG=$(cd /opt/lio && git describe --tags --always 2>/dev/null || echo "git-main")
