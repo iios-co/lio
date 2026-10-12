@@ -58,7 +58,7 @@ if [ -n "$TAG" ]; then
   if command -v gh >/dev/null 2>&1; then
     gh release create "$TAG" release/lio-extension.crx release/lio-extension-chrome.zip release/lio-extension-firefox.zip \
       --title "Lio ${TAG}" \
-      --notes "Production release of Lio with packaged browser extension bundles." || true
+      --notes "Production release of Lio with packaged browser extension bundles."
   fi
 fi
 

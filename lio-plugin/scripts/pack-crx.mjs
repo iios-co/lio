@@ -94,7 +94,7 @@ try {
   fs.mkdirSync(releaseDir, { recursive: true });
   const targetCrx = path.resolve(releaseDir, "lio-extension.crx");
   fs.copyFileSync(generatedCrx, targetCrx);
-
+  fs.chmodSync(targetCrx, 0o644);
   // Calculate extension ID from key
   let extensionId = "unknown";
   try {
