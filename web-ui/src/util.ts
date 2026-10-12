@@ -83,22 +83,25 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 
   // 2. Fallback for non-secure contexts (e.g. HTTP LAN IP addresses like http://10.0.5.x:8000)
   if (typeof document !== "undefined") {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
     try {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.setAttribute("readonly", "");
-      textarea.style.position = "fixed";
-      textarea.style.top = "-9999px";
-      textarea.style.left = "-9999px";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
       textarea.focus();
       textarea.select();
       const success = document.execCommand("copy");
-      document.body.removeChild(textarea);
       if (success) return true;
     } catch {
       // Fallback failed
+    } finally {
+      if (textarea.parentNode === document.body) {
+        document.body.removeChild(textarea);
+      }
     }
   }
 
