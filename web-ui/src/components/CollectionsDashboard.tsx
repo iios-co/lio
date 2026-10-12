@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatConnectionString } from "../lib/connectCode";
+import { useCollectionWebSocket } from "../lib/useCollectionWebSocket";
 import { admin } from "../api";
 import type { CollectionSummary } from "../types";
 import { copyToClipboard, relTime } from "../util";
@@ -17,6 +18,7 @@ export function CollectionsDashboard({ onLogout }: Props) {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["collections"],
     queryFn: () => admin.collections(),
+    refetchOnWindowFocus: true,
   });
 
   const [newName, setNewName] = useState("");
@@ -117,11 +119,11 @@ export function CollectionsDashboard({ onLogout }: Props) {
 type Armed = null | "delete" | "rotate";
 
 function CollectionCard({ c }: { c: CollectionSummary }) {
+  useCollectionWebSocket(c.token);
   const qc = useQueryClient();
   const [armed, setArmed] = useState<Armed>(null);
   const [editing, setEditing] = useState(false);
   const [rotated, setRotated] = useState(false);
-
   const rename = useMutation({
     mutationFn: (name: string) => admin.renameCollection(c.id, name),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["collections"] }),
