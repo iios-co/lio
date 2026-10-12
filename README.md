@@ -1,6 +1,4 @@
-# lio (link input output) <img width="128" height="128" alt="icon-128" src="https://github.com/user-attachments/assets/16e3c614-e78c-4fc1-bbd8-466ac39775cb" />
-
-
+# lio (link input output) <img width="128" height="128" alt="icon-128" src="https://github.com/user-attachments/assets/ed9f12da-38c0-44a8-a30e-f177e1abf41d" />
 
 > **Self-hostable, deterministic cross-browser bookmark and tab synchronization.**
 
