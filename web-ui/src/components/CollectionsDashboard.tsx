@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { formatConnectionString } from "../lib/connectCode";
 import { admin } from "../api";
 import type { CollectionSummary } from "../types";
-import { relTime } from "../util";
+import { copyToClipboard, relTime } from "../util";
 import { Logo } from "./Logo";
 import { BuildStamp } from "./BuildStamp";
 import { navigate } from "../router";
@@ -333,6 +333,7 @@ function TokenReveal({ name, token, onClose }: { name: string; token: string; on
   const [copiedToken, setCopiedToken] = useState(false);
   const [copiedPairing, setCopiedPairing] = useState(false);
   const [copyError, setCopyError] = useState("");
+  const [viewMode, setViewMode] = useState<"pairing" | "raw">("pairing");
 
   const pairingCode = useMemo(() => {
     try {
@@ -342,30 +343,35 @@ function TokenReveal({ name, token, onClose }: { name: string; token: string; on
     }
   }, [token]);
 
-  const copyToken = async () => {
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
-      await navigator.clipboard.writeText(token);
+  const copyPairing = async () => {
+    if (!pairingCode) return;
+    const ok = await copyToClipboard(pairingCode);
+    if (ok) {
       setCopyError("");
-      setCopiedToken(true);
-      setTimeout(() => setCopiedToken(false), 2000);
-    } catch {
-      setCopyError("Could not write to clipboard. Copy the field manually.");
+      setCopiedToken(false);
+      setCopiedPairing(true);
+      setTimeout(() => setCopiedPairing(false), 2000);
+    } else {
+      setViewMode("pairing");
+      setCopyError("Could not write to clipboard automatically. The pairing code is shown below — select and copy it manually.");
     }
   };
 
-  const copyPairing = async () => {
-    if (!pairingCode) return;
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
-      await navigator.clipboard.writeText(pairingCode);
+  const copyToken = async () => {
+    const ok = await copyToClipboard(token);
+    if (ok) {
       setCopyError("");
-      setCopiedPairing(true);
-      setTimeout(() => setCopiedPairing(false), 2000);
-    } catch {
-      setCopyError("Could not write to clipboard. Copy the field manually.");
+      setCopiedPairing(false);
+      setCopiedToken(true);
+      setTimeout(() => setCopiedToken(false), 2000);
+    } else {
+      setViewMode("raw");
+      setCopyError("Could not write to clipboard automatically. The token is shown below — select and copy it manually.");
     }
   };
+
+  const activeValue = viewMode === "pairing" ? (pairingCode || token) : token;
+
   return (
     <div className="mb-6 card p-4 fade-up" style={{ boxShadow: "0 0 30px rgba(122,162,247,0.3)" }}>
       <div className="flex items-center justify-between mb-2">
@@ -373,21 +379,51 @@ function TokenReveal({ name, token, onClose }: { name: string; token: string; on
         <button onClick={onClose} className="btn-ghost btn-sm">Dismiss</button>
       </div>
       <p className="text-xs text-fg-subtle mb-3">
-        Use <b>Copy Pairing Code</b> to fill both the server URL and token into the extension with a single paste, or copy the raw token below.
+        Use <b>Copy Pairing Code</b> to fill both the server URL and token into the extension with a single paste.
       </p>
-      <div className="flex items-center gap-2 mb-1">
-        <input readOnly value={token} onFocus={(e) => e.currentTarget.select()}
-          className="field font-mono !text-cyan flex-1" />
-        <button onClick={copyToken} className="btn-ghost text-xs px-3 py-1.5 whitespace-nowrap">
-          {copiedToken ? "Copied!" : "Copy Token"}
+
+      <div className="flex items-center gap-2 mb-2">
+        <button
+          type="button"
+          onClick={() => setViewMode("pairing")}
+          className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+            viewMode === "pairing"
+              ? "bg-[color-mix(in_srgb,var(--cyan)_20%,transparent)] text-cyan font-medium"
+              : "text-fg-subtle hover:text-fg"
+          }`}
+        >
+          Pairing Code (1-Click Paste)
         </button>
+        <button
+          type="button"
+          onClick={() => setViewMode("raw")}
+          className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+            viewMode === "raw"
+              ? "bg-[color-mix(in_srgb,var(--cyan)_20%,transparent)] text-cyan font-medium"
+              : "text-fg-subtle hover:text-fg"
+          }`}
+        >
+          Raw Token Only
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2 mb-1">
+        <input
+          readOnly
+          value={activeValue}
+          onFocus={(e) => e.currentTarget.select()}
+          className="field font-mono !text-cyan flex-1 text-xs"
+        />
         {pairingCode && (
           <button onClick={copyPairing} className="btn-primary text-xs px-3 py-1.5 whitespace-nowrap">
             {copiedPairing ? "Copied Code!" : "Copy Pairing Code"}
           </button>
         )}
+        <button onClick={copyToken} className="btn-ghost text-xs px-3 py-1.5 whitespace-nowrap">
+          {copiedToken ? "Copied!" : "Copy Token"}
+        </button>
       </div>
-      {copyError && <p className="text-xs text-red mt-2">{copyError}</p>}
+      {copyError && <p className="text-xs text-orange mt-2">{copyError}</p>}
     </div>
   );
 }

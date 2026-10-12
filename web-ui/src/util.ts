@@ -67,3 +67,40 @@ export function letterChip(url: string | null, title?: string): { letter: string
   for (const ch of basis) h = (h * 31 + ch.charCodeAt(0)) & 0x7fffffff;
   return { letter, color: CHIP_COLORS[h % CHIP_COLORS.length]! };
 }
+
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+
+  // 1. Modern Clipboard API (works in secure contexts: HTTPS or localhost)
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to execCommand
+    }
+  }
+
+  // 2. Fallback for non-secure contexts (e.g. HTTP LAN IP addresses like http://10.0.5.x:8000)
+  if (typeof document !== "undefined") {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.top = "-9999px";
+      textarea.style.left = "-9999px";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const success = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      if (success) return true;
+    } catch {
+      // Fallback failed
+    }
+  }
+
+  return false;
+}
