@@ -1,10 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Logo, relTime } from "@/components/Logo";
 import type { SyncConfig, SyncPair } from "@/lib/config";
 import type { LogEntry } from "@/lib/log";
 import { syncLabel, tabsPending } from "@/lib/stateLabel";
 import { ConnectFlow } from "@/components/ConnectFlow";
-
+import {
+  clearSettingsDrafts,
+  loadSettingsDrafts,
+  parseConnectionString,
+  saveSettingsDraftField,
+} from "@/lib/drafts";
 interface Status {
   ok: boolean; configured: boolean; reachable: boolean | null; lastError: string | null;
   // tokenValid: true = the server recognises this token and named the collection.
@@ -480,6 +485,41 @@ function ConnectionCard({ status, onSaved }: { status: Status; onSaved: () => vo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
+  const endpointEdited = useRef(false);
+  const tokenEdited = useRef(false);
+
+  useEffect(() => {
+    void (async () => {
+      const drafts = await loadSettingsDrafts();
+      if (!endpointEdited.current && typeof drafts.endpoint === "string") {
+        setEndpoint(drafts.endpoint);
+      }
+      if (!tokenEdited.current && typeof drafts.token === "string") {
+        setToken(drafts.token);
+      }
+    })();
+  }, []);
+
+  const updateEndpoint = (val: string) => {
+    endpointEdited.current = true;
+    setEndpoint(val);
+    void saveSettingsDraftField("endpoint", val);
+  };
+  const updateToken = (val: string) => {
+    tokenEdited.current = true;
+    setToken(val);
+    void saveSettingsDraftField("token", val);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData("text");
+    const parsed = parseConnectionString(text);
+    if (parsed) {
+      e.preventDefault();
+      updateEndpoint(parsed.endpoint);
+      updateToken(parsed.token);
+    }
+  };
 
   const dirty = endpoint !== status.endpoint || token !== (status.token ?? "");
   const broken = status.tokenValid === false || status.reachable === false;
@@ -490,15 +530,20 @@ function ConnectionCard({ status, onSaved }: { status: Status; onSaved: () => vo
       type: "SET_CONNECTION", endpoint, token,
     });
     setBusy(false);
-    if (r?.ok) { setSaved(r.collectionName ? `Connected to ${r.collectionName}` : "Connected"); onSaved(); }
-    else setError(r?.error || "Could not save.");
+    if (r?.ok) {
+      await clearSettingsDrafts();
+      setSaved(r.collectionName ? `Connected to ${r.collectionName}` : "Connected");
+      onSaved();
+    } else {
+      setError(r?.error || "Could not save.");
+    }
   }
 
   return (
     <div className="card p-3 space-y-2">
       <label className="block">
         <span className="text-[10px] uppercase tracking-wider text-fg-subtle">Server</span>
-        <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)}
+        <input value={endpoint} onChange={(e) => updateEndpoint(e.target.value)} onPaste={handlePaste}
           placeholder="http://127.0.0.1:8787"
           className="w-full mt-0.5 bg-bg border border-border rounded-lg px-2 py-1 text-[11px] font-mono text-fg focus:border-blue outline-none" />
       </label>
@@ -508,7 +553,8 @@ function ConnectionCard({ status, onSaved }: { status: Status; onSaved: () => vo
         <span className="flex items-center gap-1.5 mt-0.5">
           <input
             value={token}
-            onChange={(e) => setToken(e.target.value)}
+            onChange={(e) => updateToken(e.target.value)}
+            onPaste={handlePaste}
             type={reveal ? "text" : "password"}
             spellCheck={false}
             autoComplete="off"

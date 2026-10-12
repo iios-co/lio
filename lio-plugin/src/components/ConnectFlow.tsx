@@ -6,10 +6,15 @@
 // every surface stays attached to the button. Hence: no options entrypoint, and
 // this flow lives in the popup like everything else.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Logo } from "@/components/Logo";
 import { setConfig } from "@/lib/config";
-
+import {
+  clearConnectDrafts,
+  loadConnectDrafts,
+  parseConnectionString,
+  saveConnectDraftField,
+} from "@/lib/drafts";
 function suggestDeviceName(): string {
   const uaData = (navigator as unknown as { userAgentData?: { brands?: { brand: string }[]; platform?: string } })
     .userAgentData;
@@ -46,16 +51,44 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
   // than in the abstract.
   const [serverLinks, setServerLinks] = useState<number | null>(null);
   const [localLinks, setLocalLinks] = useState<number | null>(null);
+  const endpointEdited = useRef(false);
+  const tokenEdited = useRef(false);
+  const deviceNameEdited = useRef(false);
 
   useEffect(() => {
     void (async () => {
-      const cfg = await browser.storage.local.get(["endpoint", "token", "deviceName"]);
-      setEndpoint((cfg.endpoint as string) || "");
-      setToken((cfg.token as string) || "");
-      setDeviceName((cfg.deviceName as string) || suggestDeviceName());
+      const drafts = await loadConnectDrafts(suggestDeviceName);
+      if (!endpointEdited.current) setEndpoint(drafts.endpoint);
+      if (!tokenEdited.current) setToken(drafts.token);
+      if (!deviceNameEdited.current) setDeviceName(drafts.deviceName);
     })();
   }, []);
 
+  const updateEndpoint = (val: string) => {
+    endpointEdited.current = true;
+    setEndpoint(val);
+    void saveConnectDraftField("endpoint", val);
+  };
+  const updateToken = (val: string) => {
+    tokenEdited.current = true;
+    setToken(val);
+    void saveConnectDraftField("token", val);
+  };
+  const updateDeviceName = (val: string) => {
+    deviceNameEdited.current = true;
+    setDeviceName(val);
+    void saveConnectDraftField("deviceName", val);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData("text");
+    const parsed = parseConnectionString(text);
+    if (parsed) {
+      e.preventDefault();
+      updateEndpoint(parsed.endpoint);
+      updateToken(parsed.token);
+    }
+  };
   async function countLocalLinks(): Promise<number> {
     let links = 0;
     const walk = (nodes: Browser.bookmarks.BookmarkTreeNode[]) => {
@@ -128,6 +161,7 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
     }
     // Also persist the device name (SET_CONNECTION does not carry it).
     await setConfig({ deviceName: deviceName.trim() });
+    await clearConnectDrafts();
 
     setConn("ok");
     // State ONLY what is proven. The token was verified and the policy recorded,
@@ -168,17 +202,17 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
 
       <Field label="Server endpoint" hint="Full base URL to your lio-server (no trailing path)." htmlFor="server-endpoint-input">
         <input id="server-endpoint-input" className="field w-full" type="url" placeholder="https://lio.example.com"
-          value={endpoint} onChange={(e) => setEndpoint(e.target.value)} disabled={conn === "testing"} />
+          value={endpoint} onChange={(e) => updateEndpoint(e.target.value)} onPaste={handlePaste} disabled={conn === "testing"} />
       </Field>
 
       <Field label="Collection token" hint="Any browser using the same token syncs to the same collection." htmlFor="collection-token-input">
         <input id="collection-token-input" className="field w-full" type="text" placeholder="paste your collection token"
-          value={token} onChange={(e) => setToken(e.target.value)} disabled={conn === "testing"} />
+          value={token} onChange={(e) => updateToken(e.target.value)} onPaste={handlePaste} disabled={conn === "testing"} />
       </Field>
 
       <Field label="Device name" hint="Shown to your other devices when adopting tab sessions." htmlFor="device-name-input">
         <input id="device-name-input" className="field w-full" type="text" placeholder="Work Laptop"
-          value={deviceName} onChange={(e) => setDeviceName(e.target.value)} disabled={conn === "testing"} />
+          value={deviceName} onChange={(e) => updateDeviceName(e.target.value)} disabled={conn === "testing"} />
       </Field>
 
       <button onClick={() => void verify()} disabled={conn === "testing" || conn === "ok"}

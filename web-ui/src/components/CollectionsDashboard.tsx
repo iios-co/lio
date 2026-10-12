@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { formatConnectionString } from "../lib/connectCode";
 import { admin } from "../api";
 import type { CollectionSummary } from "../types";
 import { relTime } from "../util";
@@ -329,19 +330,50 @@ function TrashIcon() { return <svg {..._ic}><path d="M3 6h18" /><path d="M8 6V4a
 function PencilIcon() { return <svg {..._ic}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>; }
 
 function TokenReveal({ name, token, onClose }: { name: string; token: string; onClose: () => void }) {
+  const [copiedToken, setCopiedToken] = useState(false);
+  const [copiedPairing, setCopiedPairing] = useState(false);
+
+  const pairingCode = useMemo(() => {
+    try {
+      return formatConnectionString({ endpoint: window.location.origin, token });
+    } catch {
+      return "";
+    }
+  }, [token]);
+
+  const copyToken = async () => {
+    await navigator.clipboard?.writeText(token);
+    setCopiedToken(true);
+    setTimeout(() => setCopiedToken(false), 2000);
+  };
+
+  const copyPairing = async () => {
+    if (!pairingCode) return;
+    await navigator.clipboard?.writeText(pairingCode);
+    setCopiedPairing(true);
+    setTimeout(() => setCopiedPairing(false), 2000);
+  };
+
   return (
     <div className="mb-6 card p-4 fade-up" style={{ boxShadow: "0 0 30px rgba(122,162,247,0.3)" }}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-semibold text-fg">{name} — sync token</span>
+        <span className="text-sm font-semibold text-fg">{name} — sync token & pairing</span>
         <button onClick={onClose} className="btn-ghost btn-sm">Dismiss</button>
       </div>
-      <p className="text-xs text-fg-subtle mb-2">
-        Paste this into the Lio extension on each device. Store it safely — you can rotate it from the card if it leaks.
+      <p className="text-xs text-fg-subtle mb-3">
+        Use <b>Copy Pairing Code</b> to fill both the server URL and token into the extension with a single paste, or copy the raw token below.
       </p>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 mb-1">
         <input readOnly value={token} onFocus={(e) => e.currentTarget.select()}
-          className="field font-mono !text-cyan" />
-        <button onClick={() => navigator.clipboard?.writeText(token)} className="btn-primary">Copy</button>
+          className="field font-mono !text-cyan flex-1" />
+        <button onClick={copyToken} className="btn-ghost text-xs px-3 py-1.5 whitespace-nowrap">
+          {copiedToken ? "Copied!" : "Copy Token"}
+        </button>
+        {pairingCode && (
+          <button onClick={copyPairing} className="btn-primary text-xs px-3 py-1.5 whitespace-nowrap">
+            {copiedPairing ? "Copied Code!" : "Copy Pairing Code"}
+          </button>
+        )}
       </div>
     </div>
   );
