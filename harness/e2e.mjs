@@ -228,8 +228,15 @@ try {
   }
   check("dashboard: card count updates live on first sync (0 -> 6) without reload",
     preCount === 0 && liveCount === 6, `pre=${preCount} live=${liveCount}`);
+
+  // Verify clicking the new copy icon on the collection card
+  const copyBtn = await dashPage.waitForSelector('button[aria-label="Copy pairing code"]', { timeout: 5000 });
+  await copyBtn.click();
+  await sleep(200);
+  const copiedBtn = await dashPage.$('button[aria-label="Copied pairing code!"]');
+  check("dashboard: clicking card copy icon switches button to Copied pairing code", !!copiedBtn, "card copy icon feedback verified");
+
   await dashPage.close();
-  // 6. Local create / rename / move / delete must reach the server.
   const newId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "1", title: "Gamma", url: "https://gamma.example/" })).id);
   await extPage.evaluate(async () => { await chrome.bookmarks.update("11", { title: "Beta Renamed" }); });
   await extPage.evaluate(async () => { await chrome.bookmarks.move("10", { parentId: "13", index: 0 }); });
