@@ -19,7 +19,7 @@ log "Running pre-flight verification gate..."
 
 log "Building packaged browser extension release bundles..."
 mkdir -p release
-rm -f release/*.zip release/*.crx
+rm -f release/*.zip release/*.crx release/*.xpi
 
 (
   cd lio-plugin
@@ -33,9 +33,10 @@ rm -f release/*.zip release/*.crx
   [ -f "../release/lio-extension.crx" ] || die "CRX bundle not found at release/lio-extension.crx"
   cp ".output/lio-plugin-${VERSION}-chrome.zip" ../release/lio-extension-chrome.zip
   cp ".output/lio-plugin-${VERSION}-firefox.zip" ../release/lio-extension-firefox.zip
+  cp ".output/lio-plugin-${VERSION}-firefox.zip" ../release/lio-extension.xpi
 )
 log "Packaged extension release artifacts:"
-ls -lh release/*.zip release/*.crx
+ls -lh release/*.zip release/*.crx release/*.xpi
 
 log "Configuring Git remote for ${REPO_OWNER}/${REPO_NAME}..."
 if ! git remote | grep -q '^origin$'; then
@@ -56,7 +57,7 @@ if [ -n "$TAG" ]; then
     git push origin "$TAG"
   fi
   if command -v gh >/dev/null 2>&1; then
-    gh release create "$TAG" release/lio-extension.crx release/lio-extension-chrome.zip release/lio-extension-firefox.zip \
+    gh release create "$TAG" release/lio-extension.crx release/lio-extension-chrome.zip release/lio-extension-firefox.zip release/lio-extension.xpi \
       --title "Lio ${TAG}" \
       --notes "Production release of Lio with packaged browser extension bundles."
   fi

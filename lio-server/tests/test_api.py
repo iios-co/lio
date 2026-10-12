@@ -144,6 +144,62 @@ def test_lww_rejects_stale_update(client):
     assert tree["nodes"][0]["title"] == "New"
 
 
+def test_update_bookmark_endpoint(client):
+    # 1. Create a bookmark and a folder
+    client.post(
+        f"{_base()}/bookmarks/delta",
+        headers=AUTH,
+        json={
+            "device_id": "dev-a",
+            "ops": [
+                {"op": "create", "node_id": "f_1", "is_folder": True, "title": "My Folder", "timestamp": 1000},
+                {"op": "create", "node_id": "bm_1", "is_folder": False, "title": "Original Title", "url": "https://example.com/page", "timestamp": 1001},
+            ],
+        },
+    )
+
+    # 2. Update title only: preserves URL and domain
+    r = client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": "Updated Title"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["node_id"] == "bm_1"
+    assert data["title"] == "Updated Title"
+    assert data["url"] == "https://example.com/page"
+    assert data["domain"] == "example.com"
+
+    # 3. Update URL only: updates domain, preserves title
+    r = client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": "https://github.com/repo"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["title"] == "Updated Title"
+    assert data["url"] == "https://github.com/repo"
+    assert data["domain"] == "github.com"
+
+    # 4. Check delta log: contains update delta with origin="web-ui"
+    deltas = client.get(f"{_base()}/bookmarks/delta?since=0", headers=AUTH).json()
+    update_ops = [op for op in deltas["ops"] if op["op"] == "update" and op["node_id"] == "bm_1"]
+    assert len(update_ops) >= 2
+    assert update_ops[-1]["origin"] == "web-ui"
+
+    # 5. Validation errors
+    # Empty body
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={}).status_code == 400
+    # Explicit null values
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": None}).status_code == 400
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": None}).status_code == 400
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": None, "url": None}).status_code == 400
+    # Blank title
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": "   "}).status_code == 400
+    # Blank URL
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": "   "}).status_code == 400
+    # Invalid URL scheme (e.g. javascript:, file:, data:)
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": "javascript:alert(1)"}).status_code == 400
+    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": "file:///etc/passwd"}).status_code == 400
+    # Reject editing folders
+    assert client.patch(f"{_base()}/bookmarks/f_1", headers=AUTH, json={"title": "New Folder Name"}).status_code == 400
+    # 404 on nonexistent
+    assert client.patch(f"{_base()}/bookmarks/nonexistent", headers=AUTH, json={"title": "Test"}).status_code == 404
+
 def test_incremental_pull_excludes_own_ops(client):
     # dev-a authors two ops.
     client.post(

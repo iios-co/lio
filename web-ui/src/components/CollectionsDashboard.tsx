@@ -172,27 +172,29 @@ function CollectionCard({ c }: { c: CollectionSummary }) {
   return (
     <div className="card p-4 fade-up flex flex-col gap-3">
       {/* 1 — Name (edit) (delete) */}
-      <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <NameField
-            name={c.name || "Untitled"}
-            editing={editing}
-            pending={rename.isPending}
-            onStart={() => setEditing(true)}
-            onDone={(v) => {
-              setEditing(false);
-              if (v && v !== c.name) rename.mutate(v);
-            }}
-          />
-          <div className="text-[11px] text-fg-subtle mt-0.5">active {relTime(c.last_activity)}</div>
+      <div>
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <NameField
+              name={c.name || "Untitled"}
+              editing={editing}
+              pending={rename.isPending}
+              onStart={() => setEditing(true)}
+              onDone={(v) => {
+                setEditing(false);
+                if (v && v !== c.name) rename.mutate(v);
+              }}
+            />
+          </div>
+          <IconBtn label="Rename collection" tone="plain" onClick={() => setEditing(true)}>
+            <PencilIcon />
+          </IconBtn>
+          <IconBtn label="Delete collection" tone="red" pressed={armed === "delete"}
+            onClick={() => setArmed(armed === "delete" ? null : "delete")}>
+            <TrashIcon />
+          </IconBtn>
         </div>
-        <IconBtn label="Rename collection" tone="plain" onClick={() => setEditing(true)}>
-          <PencilIcon />
-        </IconBtn>
-        <IconBtn label="Delete collection" tone="red" pressed={armed === "delete"}
-          onClick={() => setArmed(armed === "delete" ? null : "delete")}>
-          <TrashIcon />
-        </IconBtn>
+        <div className="text-[11px] text-fg-subtle mt-0.5">active {relTime(c.last_activity)}</div>
       </div>
 
       {/* 2 — Token (rotate) */}
@@ -344,13 +346,13 @@ function NameField({ name, editing, pending, onStart, onDone }: {
         }}
         maxLength={120}
         aria-label="Collection name"
-        className="field field-sm !text-[15px] !font-semibold !border-blue"
+        className="field field-sm !text-[15px] !font-semibold !border-blue w-full h-[32px] py-1 leading-normal"
       />
     );
   }
   return (
     <button onClick={onStart} title="Click to rename"
-      className="block max-w-full text-[15px] font-semibold text-fg hover:text-blue transition-colors truncate text-left">
+      className="block max-w-full text-[15px] font-semibold text-fg hover:text-blue transition-colors truncate text-left leading-normal py-1">
       {name}{pending && <span className="ml-2 text-[10px] font-normal text-fg-subtle">saving…</span>}
     </button>
   );

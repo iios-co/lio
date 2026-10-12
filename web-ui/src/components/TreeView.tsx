@@ -4,9 +4,9 @@ import {
   type DragEndEvent, type DragStartEvent,
 } from "@dnd-kit/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { coll } from "../api";
-import { hostOf, relTime } from "../util";
+import { relTime } from "../util";
 import {
   countLeaves, filterTree, flatten, indexById, isDescendant, type TreeNode,
 } from "../lib/tree";
@@ -71,7 +71,11 @@ export function TreeView({ nodes, token, query = "", frozen = false }: {
     mutationFn: (nodeId: string) => coll.remove(token, nodeId),
     onSuccess: () => { setConfirmDel(null); invalidate(); },
   });
-
+  const updateNode = useMutation({
+    mutationFn: (v: { nodeId: string; patch: { title?: string; url?: string } }) =>
+      coll.update(token, v.nodeId, v.patch),
+    onSuccess: invalidate,
+  });
   const toggle = (id: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -148,6 +152,7 @@ export function TreeView({ nodes, token, query = "", frozen = false }: {
               depth={depth}
               open={searching || expanded.has(node.node_id)}
               searching={locked}
+              locked={locked}
               dragging={dragId === node.node_id}
               confirming={confirmDel === node.node_id}
               deleting={remove.isPending && confirmDel === node.node_id}
@@ -155,6 +160,14 @@ export function TreeView({ nodes, token, query = "", frozen = false }: {
               onAskDelete={() => setConfirmDel(node.node_id)}
               onCancelDelete={() => setConfirmDel(null)}
               onConfirmDelete={() => remove.mutate(node.node_id)}
+              onUpdate={async (patch) => {
+                try {
+                  await updateNode.mutateAsync({ nodeId: node.node_id, patch });
+                  return true;
+                } catch {
+                  return false;
+                }
+              }}
             />
           ))}
         </div>
@@ -176,12 +189,13 @@ export function TreeView({ nodes, token, query = "", frozen = false }: {
 }
 
 function Row({
-  node, depth, open, searching, dragging, confirming, deleting,
-  onToggle, onAskDelete, onCancelDelete, onConfirmDelete,
+  node, depth, open, searching, locked, dragging, confirming, deleting,
+  onToggle, onAskDelete, onCancelDelete, onConfirmDelete, onUpdate,
 }: {
-  node: TreeNode; depth: number; open: boolean; searching: boolean; dragging: boolean;
+  node: TreeNode; depth: number; open: boolean; searching: boolean; locked: boolean; dragging: boolean;
   confirming: boolean; deleting: boolean;
   onToggle: () => void; onAskDelete: () => void; onCancelDelete: () => void; onConfirmDelete: () => void;
+  onUpdate: (patch: { title?: string; url?: string }) => Promise<boolean>;
 }) {
   const drag = useDraggable({ id: node.node_id, disabled: searching });
   // Sibling drop slot.
@@ -202,16 +216,109 @@ function Row({
         ? `Alive · checked ${relTime(node.checked_at)}`
         : null;
   const openLink = () => node.url && window.open(node.url, "_blank", "noopener,noreferrer");
-  const host = hostOf(node.url);
 
   const nesting = node.is_folder && into.isOver;
   const siblingOver = sibling.isOver && !nesting;
 
+  const [editingField, setEditingField] = useState<null | "title" | "url">(null);
+  const [draftTitle, setDraftTitle] = useState(node.title || "");
+  const [draftUrl, setDraftUrl] = useState(node.url || "");
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [editError, setEditError] = useState("");
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const urlInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editingField) {
+      setDraftTitle(node.title || "");
+      setDraftUrl(node.url || "");
+      setEditError("");
+      setSaving(false);
+    }
+  }, [node.title, node.url, editingField]);
+
+  useEffect(() => {
+    if (editingField === "title") {
+      titleInputRef.current?.select();
+    } else if (editingField === "url") {
+      urlInputRef.current?.select();
+    }
+  }, [editingField]);
+
+  const commitTitle = async () => {
+    if (savingRef.current) return;
+    const val = draftTitle.trim();
+    if (!val) {
+      setEditError("Title cannot be empty");
+      return;
+    }
+    if (val === node.title) {
+      setEditingField(null);
+      return;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setEditError("");
+    try {
+      const ok = await onUpdate({ title: val });
+      if (ok) {
+        setEditingField(null);
+      } else {
+        setEditError("Failed to update title");
+      }
+    } catch {
+      setEditError("Failed to update title");
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  const commitUrl = async () => {
+    if (savingRef.current) return;
+    const val = draftUrl.trim();
+    if (!val) {
+      setEditError("URL cannot be empty");
+      return;
+    }
+    try {
+      const u = new URL(val);
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        setEditError("URL must start with http:// or https://");
+        return;
+      }
+    } catch {
+      setEditError("Invalid URL format");
+      return;
+    }
+    if (val === node.url) {
+      setEditingField(null);
+      return;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setEditError("");
+    try {
+      const ok = await onUpdate({ url: val });
+      if (ok) {
+        setEditingField(null);
+      } else {
+        setEditError("Failed to update URL");
+      }
+    } catch {
+      setEditError("Failed to update URL");
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
   return (
-    <div ref={sibling.setNodeRef} style={{ marginLeft: depth * 18 }}>
+    <div ref={sibling.setNodeRef} style={{ marginLeft: depth * 18 }} data-node-id={node.node_id}>
       <div
         ref={drag.setNodeRef}
-        {...(searching ? {} : { ...drag.attributes, ...drag.listeners })}
+        {...(searching || !!editingField ? {} : { ...drag.attributes, ...drag.listeners })}
         className={`group relative flex items-center gap-2 pr-1.5 py-1.5 rounded-lg transition-colors
           ${dragging ? "opacity-40" : ""}
           ${nesting ? "ring-2 ring-blue bg-[color-mix(in_srgb,var(--blue)_20%,transparent)]" : ""}
@@ -251,10 +358,91 @@ function Row({
         ) : (
           <>
             <Favicon url={node.url} title={node.title} />
-            <span className="min-w-0 flex-1 truncate text-sm text-fg" title={node.url || node.title}>
-              {node.title || node.url}
-              {host && <span className="ml-2 text-[11px] text-fg-subtle">{host}</span>}
-            </span>
+            {editingField === "title" ? (
+              <form
+                onSubmit={(e) => { e.preventDefault(); void commitTitle(); }}
+                className="min-w-0 flex-1 flex flex-col gap-0.5"
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-1.5 w-full">
+                  <input
+                    ref={titleInputRef}
+                    value={draftTitle}
+                    disabled={saving}
+                    onChange={(e) => { setDraftTitle(e.target.value); setEditError(""); }}
+                    onBlur={() => { if (!saving) void commitTitle(); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") { setDraftTitle(node.title || ""); setEditingField(null); }
+                    }}
+                    aria-label="Edit bookmark title"
+                    className="field field-sm !text-sm !py-0.5 !px-2 w-full !border-blue"
+                  />
+                  {saving && <span className="text-[10px] text-fg-subtle shrink-0">saving…</span>}
+                </div>
+                {editError && <span role="status" aria-live="polite" className="text-[10px] text-red">{editError}</span>}
+              </form>
+            ) : editingField === "url" ? (
+              <form
+                onSubmit={(e) => { e.preventDefault(); void commitUrl(); }}
+                className="min-w-0 flex-1 flex flex-col gap-0.5"
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-1.5 w-full">
+                  <input
+                    ref={urlInputRef}
+                    value={draftUrl}
+                    disabled={saving}
+                    type="url"
+                    onChange={(e) => { setDraftUrl(e.target.value); setEditError(""); }}
+                    onBlur={() => { if (!saving) void commitUrl(); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") { setDraftUrl(node.url || ""); setEditingField(null); }
+                    }}
+                    aria-label="Edit bookmark URL"
+                    className="field field-sm !text-xs !py-0.5 !px-2 w-full !border-blue font-mono text-cyan"
+                  />
+                  {saving && <span className="text-[10px] text-fg-subtle shrink-0">saving…</span>}
+                </div>
+                {editError && <span role="status" aria-live="polite" className="text-[10px] text-red">{editError}</span>}
+              </form>
+            ) : (
+              <span className="min-w-0 flex-1 flex items-center gap-2 truncate">
+                <button
+                  type="button"
+                  disabled={locked}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!locked) {
+                      setDraftTitle(node.title || "");
+                      setEditingField("title");
+                    }
+                  }}
+                  title={locked ? undefined : "Click to edit title"}
+                  className="text-sm font-medium text-fg hover:text-blue transition-colors truncate text-left disabled:hover:text-fg"
+                >
+                  {node.title || node.url || "Untitled"}
+                </button>
+                {node.url && (
+                  <button
+                    type="button"
+                    disabled={locked}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!locked) {
+                        setDraftUrl(node.url || "");
+                        setEditingField("url");
+                      }
+                    }}
+                    title={locked ? undefined : "Click to edit URL"}
+                    className="text-[11px] text-fg-subtle hover:text-blue transition-colors truncate text-left font-mono shrink-0 max-w-[200px] disabled:hover:text-fg-subtle"
+                  >
+                    {node.url}
+                  </button>
+                )}
+              </span>
+            )}
           </>
         )}
 

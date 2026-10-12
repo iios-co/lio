@@ -245,6 +245,17 @@ class ReorderResponse(BaseModel):
     sort_key: str
 
 
+class UpdateNodeRequest(BaseModel):
+    title: str | None = Field(None, max_length=4096)
+    url: str | None = Field(None, max_length=4096)
+
+
+class UpdateNodeResponse(BaseModel):
+    node_id: str
+    title: str
+    url: str | None = None
+    domain: str | None = None
+
 class DeleteNodeResponse(BaseModel):
     """How many nodes the delete removed (a folder takes its whole subtree)."""
 

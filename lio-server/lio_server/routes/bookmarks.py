@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import time
-
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from .. import db
@@ -35,6 +35,8 @@ from ..models import (
     SyncOperation,
     SyncOpChanges,
     UndoResponse,
+    UpdateNodeRequest,
+    UpdateNodeResponse,
     VisitBatchRequest,
     VisitBatchResponse,
 )
@@ -1053,8 +1055,102 @@ def reorder(
         "bookmarks_updated",
         {"timestamp": _now_ms(), "origin": "web-ui", "op": "move", "node_id": node_id},
     )
-
     return ReorderResponse(node_id=node_id, sort_key=new_key)
+
+
+@router.patch("/{node_id}", response_model=UpdateNodeResponse)
+def update_node(
+    node_id: str,
+    req: UpdateNodeRequest,
+    cid: str = Depends(require_collection),
+) -> UpdateNodeResponse:
+    """Update a bookmark's title and/or URL.
+
+    Emits an ``update`` delta (origin ``web-ui``) and broadcasts ``bookmarks_updated``
+    so synced extensions mirror the change to local browser bookmarks."""
+    if not req.model_fields_set:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one field (title or url) must be provided.",
+        )
+
+    if "title" in req.model_fields_set:
+        if req.title is None or not req.title.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Title cannot be empty.",
+            )
+
+    if "url" in req.model_fields_set:
+        if req.url is None or not req.url.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="URL cannot be empty.",
+            )
+        parsed = urlparse(req.url.strip())
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="URL must be a valid http or https address.",
+            )
+
+    conn = db.get_conn()
+    with db.write_tx() as conn:
+        row = conn.execute(
+            "SELECT id, is_folder, title, url FROM bookmarks WHERE cid = ? AND id = ? AND deleted = 0",
+            (cid, node_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No such bookmark in this collection.",
+            )
+        if row["is_folder"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only bookmark links can be edited.",
+            )
+
+        new_title = req.title.strip() if "title" in req.model_fields_set else row["title"]
+        new_url = req.url.strip() if "url" in req.model_fields_set else row["url"]
+        new_domain = domain_of(new_url) if new_url else None
+        ts = _now_ms()
+        cur = conn.execute(
+            """
+            INSERT INTO delta_log (cid, op, node_id, payload_json, timestamp, origin)
+            VALUES (?, 'update', ?, ?, ?, 'web-ui')
+            """,
+            (
+                cid,
+                node_id,
+                json.dumps({
+                    "op": "update",
+                    "node_id": node_id,
+                    "title": new_title,
+                    "url": new_url,
+                    "timestamp": ts,
+                }),
+                ts,
+            ),
+        )
+        sv = int(cur.lastrowid)
+        conn.execute(
+            """
+            UPDATE bookmarks
+            SET title = ?, url = ?, domain = ?, date_modified = ?, server_version = ?
+            WHERE cid = ? AND id = ?
+            """,
+            (new_title, new_url, new_domain, ts, sv, cid, node_id),
+        )
+        _prune_delta_log(conn, cid, last_row_id=sv)
+
+    broadcast_event(
+        cid,
+        "bookmarks_updated",
+        {"timestamp": ts, "origin": "web-ui", "op": "update", "node_id": node_id},
+    )
+
+    return UpdateNodeResponse(node_id=node_id, title=new_title, url=new_url, domain=new_domain)
 
 
 @router.delete("/{node_id}", response_model=DeleteNodeResponse)

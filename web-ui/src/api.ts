@@ -283,6 +283,15 @@ export const coll = {
     nodeId: string
   ): Promise<{ deleted: number; node_ids: string[] }> =>
     collReq(token, `/bookmarks/${encodeURIComponent(nodeId)}`, { method: "DELETE" }),
+  update: (
+    token: string,
+    nodeId: string,
+    patch: { title?: string; url?: string }
+  ): Promise<{ node_id: string; title: string; url: string | null; domain?: string | null }> =>
+    collReq(token, `/bookmarks/${encodeURIComponent(nodeId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
   reorder: (
     token: string,
     nodeId: string,

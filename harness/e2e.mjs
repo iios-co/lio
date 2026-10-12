@@ -252,8 +252,86 @@ try {
   check("dashboard: card copy icon copies valid pairing code payload with current endpoint and token",
     payloadParsed?.endpoint === BASE && payloadParsed?.token === token,
     `endpoint=${payloadParsed?.endpoint} token=${payloadParsed?.token}`);
-  await dashPage.close();
+  // Verify collection name input and action buttons share vertical center
+  const renameBtn = await dashPage.waitForSelector('button[aria-label="Rename collection"]');
+  await renameBtn.click();
+  const nameInput = await dashPage.waitForSelector('input[aria-label="Collection name"]');
+  const nameBox = await nameInput.boundingBox();
+  const renameBox = await renameBtn.boundingBox();
+  if (nameBox && renameBox) {
+    const nameCenter = nameBox.y + nameBox.height / 2;
+    const btnCenter = renameBox.y + renameBox.height / 2;
+    check("dashboard: collection name input and action buttons share vertical center",
+      Math.abs(nameCenter - btnCenter) <= 2,
+      `nameCenter=${nameCenter.toFixed(1)} btnCenter=${btnCenter.toFixed(1)} diff=${Math.abs(nameCenter - btnCenter).toFixed(1)}`);
+  }
+  await nameInput.press("Escape");
 
+  // Verify inline editing of bookmark title and URL in web UI
+  await dashPage.goto(`${BASE}/#/c/${token}`);
+  const expandAll = await dashPage.waitForSelector('button:has-text("Expand all")');
+  await expandAll.click();
+  await dashPage.waitForSelector('[data-node-id="14"]');
+  // Locate stable row for node 14
+  const row14 = dashPage.locator('[data-node-id="14"]');
+  // 1. Click title to edit title in row 14
+  const titleBtn = row14.locator('button:has-text("Nested One")');
+  await titleBtn.click();
+  const titleInput = row14.locator('input[aria-label="Edit bookmark title"]');
+  await titleInput.fill("Nested Updated Title");
+  await titleInput.press("Enter");
+  await row14.locator('button:has-text("Nested Updated Title")').waitFor();
+
+  // Poll server: title updated, untouched URL preserved
+  let server14;
+  for (let i = 0; i < 20; i++) {
+    const t = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
+    server14 = (t.json?.nodes ?? []).find((n) => n.id === "14");
+    if (server14?.title === "Nested Updated Title") break;
+    await sleep(200);
+  }
+  check("web UI: title update preserves untouched URL on server",
+    server14?.title === "Nested Updated Title" && server14?.url === "https://nested.example/one",
+    `title=${server14?.title} url=${server14?.url}`);
+
+  // 2. Click URL to edit URL in that SAME row 14
+  const urlBtn = row14.locator('button[title="Click to edit URL"]');
+  await urlBtn.click();
+  const urlInput = row14.locator('input[aria-label="Edit bookmark URL"]');
+  await urlInput.fill("https://nested.example/new-path");
+  await urlInput.press("Enter");
+  await row14.locator('button:has-text("https://nested.example/new-path")').waitFor();
+
+  // Poll server: URL updated, untouched title preserved
+  for (let i = 0; i < 20; i++) {
+    const t = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
+    server14 = (t.json?.nodes ?? []).find((n) => n.id === "14");
+    if (server14?.url === "https://nested.example/new-path") break;
+    await sleep(200);
+  }
+  check("web UI: URL update preserves untouched title on server",
+    server14?.title === "Nested Updated Title" && server14?.url === "https://nested.example/new-path",
+    `title=${server14?.title} url=${server14?.url}`);
+
+  // 3. Confirm extension receives both updates in local browser bookmark node "14"
+  let ext14;
+  for (let i = 0; i < 25; i++) {
+    ext14 = await extPage.evaluate(async () => {
+      try {
+        const [node] = await chrome.bookmarks.get("14");
+        return { title: node.title, url: node.url };
+      } catch {
+        return null;
+      }
+    });
+    if (ext14?.title === "Nested Updated Title" && ext14?.url === "https://nested.example/new-path") break;
+    await sleep(300);
+  }
+  check("extension: receives both web-origin title and URL updates in local browser bookmark",
+    ext14?.title === "Nested Updated Title" && ext14?.url === "https://nested.example/new-path",
+    `local title=${ext14?.title} url=${ext14?.url}`);
+
+  await dashPage.close();
   // 6. Local create / rename / move / delete must reach the server.
   const newId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "1", title: "Gamma", url: "https://gamma.example/" })).id);
   await extPage.evaluate(async () => { await chrome.bookmarks.update("11", { title: "Beta Renamed" }); });
