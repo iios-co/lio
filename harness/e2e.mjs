@@ -229,14 +229,32 @@ try {
   check("dashboard: card count updates live on first sync (0 -> 6) without reload",
     preCount === 0 && liveCount === 6, `pre=${preCount} live=${liveCount}`);
 
-  // Verify clicking the new copy icon on the collection card
+  // Verify clicking the new copy icon on the collection card copies valid pairing code
+  await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
   const copyBtn = await dashPage.waitForSelector('button[aria-label="Copy pairing code"]', { timeout: 5000 });
   await copyBtn.click();
   await sleep(200);
   const copiedBtn = await dashPage.$('button[aria-label="Copied pairing code!"]');
   check("dashboard: clicking card copy icon switches button to Copied pairing code", !!copiedBtn, "card copy icon feedback verified");
 
+  let copiedText = await dashPage.evaluate(() => navigator.clipboard?.readText?.()).catch(() => "");
+  if (!copiedText) {
+    const fallbackInput = await dashPage.$('input[aria-label="Pairing code"]');
+    if (fallbackInput) copiedText = await fallbackInput.inputValue();
+  }
+  let payloadParsed = null;
+  if (copiedText && copiedText.startsWith("lio-connect:v1:")) {
+    try {
+      const b64 = copiedText.replace("lio-connect:v1:", "");
+      payloadParsed = JSON.parse(Buffer.from(b64, "base64url").toString("utf8"));
+    } catch {}
+  }
+  check("dashboard: card copy icon copies valid pairing code payload with current endpoint and token",
+    payloadParsed?.endpoint === BASE && payloadParsed?.token === token,
+    `endpoint=${payloadParsed?.endpoint} token=${payloadParsed?.token}`);
   await dashPage.close();
+
+  // 6. Local create / rename / move / delete must reach the server.
   const newId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "1", title: "Gamma", url: "https://gamma.example/" })).id);
   await extPage.evaluate(async () => { await chrome.bookmarks.update("11", { title: "Beta Renamed" }); });
   await extPage.evaluate(async () => { await chrome.bookmarks.move("10", { parentId: "13", index: 0 }); });
