@@ -6,14 +6,14 @@ import { isConfigured, getConfig, getSyncConfig, setConfig, setSyncConfig, setWa
 import {
   onCreated, onChanged, onMoved, onRemoved, syncTransaction,
   invalidateScopeCache, listFolders, fullPushInScope, inSyncScope, pushLocalOnlyNodes,
-  bootstrap, drainBookmarkEvents, setBookmarkSyncRequester,
+  bootstrap, drainBookmarkEvents, setBookmarkSyncRequester, clearKnownServerIds, reconcileFromServer,
 } from "@/lib/bookmarks";
 import {
   diffTrees, describeDiff, linkCount, localNodes, folderNodes, serverNodes, type LeafRef,
 } from "@/lib/reconcile";
 import { scheduleTabSync, pushNow, markSessionBoundary, adoptSession, restoreHistorySession, localTabs, lastTabPush, compareTabsWithServer } from "@/lib/tabs";
 import { recordVisit, flushVisits, invalidateVisitIndex } from "@/lib/visits";
-import { size as queueSize } from "@/lib/queue";
+import { size as queueSize, clear as clearQueue } from "@/lib/queue";
 import { getLog, clearLog, log } from "@/lib/log";
 import { checkGate, resetGate } from "@/lib/gate";
 import { api } from "@/lib/api";
@@ -397,14 +397,31 @@ export default defineBackground(() => {
             }
             const isOnboarding = msg.bootstrapMode === "merge" || msg.bootstrapMode === "server" || msg.bootstrapMode === "browser";
             const mode = isOnboarding ? msg.bootstrapMode : "merge";
-            await setConfig({ endpoint, token, bootstrapMode: mode });
+            const currentCfg = await getConfig();
+            const isSwitchingCollection = currentCfg.endpoint !== endpoint || currentCfg.token !== token;
+
+            // When onboarding or switching collections, atomically reset watermark,
+            // queue, and stale knownServerIds so state from a prior collection or
+            // sync session can NEVER poison the new collection.
+            if (isOnboarding || isSwitchingCollection) {
+              await clearQueue();
+              await clearKnownServerIds();
+              await setConfig({
+                endpoint,
+                token,
+                bootstrapMode: mode,
+                lastPulledTs: 0,
+                lastServerVersion: 0,
+              });
+            } else {
+              await setConfig({ endpoint, token, bootstrapMode: mode });
+            }
 
             const syncCfg = await getSyncConfig();
             const { sync: nextSync, provisioned } = ensureOnboardingBookmarkPair(syncCfg, isOnboarding);
             if (provisioned) {
               await setSyncConfig(nextSync);
             }
-
             await log({
               kind: "info",
               title: `Connected to ${collectionName ?? "collection"}`,
@@ -460,8 +477,6 @@ export default defineBackground(() => {
             break;
           }
           case "FORCE_RECONCILE": {
-            const { reconcileFromServer } = await import("@/lib/bookmarks");
-            const { log } = await import("@/lib/log");
             try {
               await reconcileFromServer();
               await runSync();

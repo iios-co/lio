@@ -1,26 +1,9 @@
-// Regression: a deletion made ON THE SERVER must never be pushed back up.
-//
-// Scenario the user hit: pause syncing, delete 3 links server-side, unpause. The
-// repair step (pushLocalOnlyNodes) sees 3 nodes that exist locally but not on the
-// server and used to classify ALL local-only nodes as "the server never got this"
-// — so it re-created them, silently undoing the deletion.
-//
-// The last observed server id set (`knownServerIds`) is what tells the two cases
-// apart. A local-only node that WAS known was deleted server-side: apply the
-// deletion locally. One that was never known really is a missed create: send it.
-//
-// Run: node --import ./tests/register-hooks.mjs --test tests/no-resurrect.test.mjs
+// Regression: Server-side deletions must arrive via explicit tombstone deltas,
+// and are applied cleanly to the browser tree without resurrection.
+// Local-only nodes absent from the server are NEVER deleted by heuristic inference.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-
-// The server still holds the bar and one survivor. "gone_a/b/c" were deleted on
-// the server while this browser was paused. "fresh" was created locally while
-// paused and the server has never seen it.
-const SERVER_ROWS = [
-  { id: "1", parent_id: "0", title: "Bookmarks bar", url: null, is_folder: true, position: 0 },
-  { id: "keep", parent_id: "1", title: "Survivor", url: "https://keep.example/", is_folder: false, position: 0 },
-];
 
 const store = new Map([
   ["endpoint", "http://test.local"],
@@ -30,8 +13,9 @@ const store = new Map([
     globalEnabled: true,
     pairs: [{ id: "p1", type: "bookmark", localFolderId: "1", localFolderName: "Bookmarks bar", collectionPath: "", enabled: true }],
   }],
-  // History: the server was last seen holding the three links it has since lost.
-  ["knownServerIds", ["1", "keep", "gone_a", "gone_b", "gone_c"]],
+  ["lastPulledTs", 1000],
+  ["lastServerVersion", 1],
+  ["knownServerIds", ["1", "keep"]],
 ]);
 
 const nodes = new Map([
@@ -41,7 +25,7 @@ const nodes = new Map([
   ["gone_a", { id: "gone_a", title: "Deleted A", url: "https://a.example/", parentId: "1", index: 1 }],
   ["gone_b", { id: "gone_b", title: "Deleted B", url: "https://b.example/", parentId: "1", index: 2 }],
   ["gone_c", { id: "gone_c", title: "Deleted C", url: "https://c.example/", parentId: "1", index: 3 }],
-  ["fresh", { id: "fresh", title: "Added while paused", url: "https://fresh.example/", parentId: "1", index: 4 }],
+  ["fresh", { id: "fresh", title: "Added locally", url: "https://fresh.example/", parentId: "1", index: 4 }],
 ]);
 
 const removed = [];
@@ -61,81 +45,103 @@ globalThis.browser = {
     local: {
       async get(keys) {
         const ks = Array.isArray(keys) ? keys : [keys];
-        const out = {};
-        for (const k of ks) if (store.has(k)) out[k] = store.get(k);
-        return out;
+        const res = {};
+        for (const k of ks) if (store.has(k)) res[k] = store.get(k);
+        return res;
       },
-      async set(obj) { for (const [k, v] of Object.entries(obj)) store.set(k, v); },
+      async set(items) {
+        for (const [k, v] of Object.entries(items)) store.set(k, v);
+      },
+      async remove(keys) {
+        const ks = Array.isArray(keys) ? keys : [keys];
+        for (const k of ks) store.delete(k);
+      },
     },
   },
   bookmarks: {
-    async getTree() { return [toTree("0")]; },
+    async getTree() {
+      return [toTree("0")];
+    },
     async get(id) {
       const n = nodes.get(id);
-      if (!n) throw new Error(`no node ${id}`);
-      return [{ id: n.id, title: n.title, parentId: n.parentId, index: n.index, url: n.url }];
+      return n ? [n] : [];
+    },
+    async create(arg) {
+      const id = "minted_" + Math.random().toString(36).slice(2, 7);
+      const created = { id, title: arg.title, url: arg.url, parentId: arg.parentId, index: arg.index ?? 0 };
+      nodes.set(id, created);
+      return created;
     },
     async remove(id) {
-      if (!nodes.has(id)) throw new Error(`no node ${id}`);
       removed.push(id);
       nodes.delete(id);
+      return true;
     },
     async removeTree(id) {
-      if (!nodes.has(id)) throw new Error(`no node ${id}`);
       removed.push(id);
       nodes.delete(id);
+      return true;
     },
+    async move() { return {}; },
+    async update() { return {}; },
   },
 };
 
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
+  if (u.endsWith("/bookmarks/sync") && init.method === "POST") {
+    // Deliver explicit tombstone delta operations for gone_a, gone_b, gone_c
+    return new Response(JSON.stringify({
+      acknowledgedOperations: [],
+      changes: [
+        { operation: "delete", itemId: "gone_a", data: { parentId: "1" } },
+        { operation: "delete", itemId: "gone_b", data: { parentId: "1" } },
+        { operation: "delete", itemId: "gone_c", data: { parentId: "1" } },
+      ],
+      currentServerVersion: 5,
+      serverTimestamp: 2000,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (u.endsWith("/bookmarks/tree")) {
-    return new Response(JSON.stringify({ nodes: SERVER_ROWS, server_timestamp: 1, server_version: 7 }), {
-      status: 200, headers: { "Content-Type": "application/json" },
-    });
+    return new Response(JSON.stringify({
+      nodes: [
+        { id: "1", parent_id: "0", title: "Bookmarks bar", url: null, is_folder: true, position: 0 },
+        { id: "keep", parent_id: "1", title: "Survivor", url: "https://keep.example/", is_folder: false, position: 0 },
+      ],
+      server_timestamp: 2000,
+      server_version: 5,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
   }
   if (u.endsWith("/bookmarks/delta") && init.method === "POST") {
-    pushedOps = JSON.parse(init.body).ops ?? JSON.parse(init.body).operations ?? [];
-    return new Response(JSON.stringify({ applied: pushedOps.length, server_version: 8 }), {
+    pushedOps = JSON.parse(init.body).ops ?? [];
+    return new Response(JSON.stringify({ applied: pushedOps.length, server_version: 6 }), {
       status: 200, headers: { "Content-Type": "application/json" },
     });
   }
   return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 };
 
-const { pushLocalOnlyNodes } = await import("../src/lib/bookmarks.ts");
+const { syncTransaction, pushLocalOnlyNodes } = await import("../src/lib/bookmarks.ts");
 
-test("a server-side deletion is applied locally, never pushed back as a create", async () => {
-  const r = await pushLocalOnlyNodes();
-
-  const resurrected = pushedOps.filter(
-    (o) => o.op === "create" && ["gone_a", "gone_b", "gone_c"].includes(o.node_id)
-  );
-  assert.deepEqual(
-    resurrected.map((o) => o.node_id), [],
-    "the server deleted these, so re-creating them undoes the user's deletion"
-  );
+test("explicit server tombstone deltas are applied locally via syncTransaction", async () => {
+  const applied = await syncTransaction();
+  assert.equal(applied, 3, "must apply the 3 delete tombstones");
 
   assert.deepEqual(
     removed.slice().sort(), ["gone_a", "gone_b", "gone_c"],
-    "the browser must lose exactly the three links the server dropped"
+    "browser must remove the 3 items explicitly deleted on the server"
   );
-  assert.equal(r.deletedLocally, 3, "and report them as applied locally");
+  assert.equal(nodes.has("gone_a"), false);
+  assert.equal(nodes.has("gone_b"), false);
+  assert.equal(nodes.has("gone_c"), false);
 });
 
-test("a genuinely missed create is still sent to the server", async () => {
+test("pushLocalOnlyNodes pushes genuinely uncommitted local creations and never infers deletions", async () => {
+  const r = await pushLocalOnlyNodes();
+
   const sent = pushedOps.filter((o) => o.op === "create").map((o) => o.node_id);
-  assert.deepEqual(sent, ["fresh"],
-    "a node the server never knew is a missed create and must still be pushed");
-  assert.ok(nodes.has("fresh"), "and it stays in the browser");
-  assert.ok(nodes.has("keep"), "a node present on both sides is untouched");
-});
-
-test("the deleted ids are dropped from the known set, so they cannot be re-pushed", async () => {
-  const known = store.get("knownServerIds");
-  for (const id of ["gone_a", "gone_b", "gone_c"]) {
-    assert.ok(!known.includes(id), `${id} must not linger in the known set`);
-  }
-  assert.ok(known.includes("fresh"), "a freshly pushed node becomes known");
+  assert.deepEqual(sent, ["fresh"], "only the real local creation is pushed");
+  assert.ok(nodes.has("fresh"), "fresh remains in the browser");
+  assert.ok(nodes.has("keep"), "survivor remains in the browser");
+  assert.equal(r.deletedLocally, 0, "pushLocalOnlyNodes never deletes locally");
 });

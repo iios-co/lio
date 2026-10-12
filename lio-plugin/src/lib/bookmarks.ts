@@ -421,9 +421,21 @@ export async function reconcileFromServer(): Promise<{
 
   await withApplyGuard(async () => {
     // -- 1. delete local nodes the server no longer has ---------------------
-    // Deepest-first so removing a parent does not invalidate child ids we are
-    // still iterating.
+    // CIRCUIT BREAKER: Never wipe large numbers of bookmarks or wipe an entire tree
+    // automatically. If the difference represents more than 15% of local bookmarks
+    // or if the server tree is suspiciously empty/smaller than local, abort and fail closed.
     const doomed = [...local.keys()].filter((id) => !serverById.has(id) && !protectedIds.has(id));
+    const isCatastrophicWipe = (local.size > 10 && doomed.length > 5 && doomed.length > local.size * 0.15) ||
+                               (local.size > 20 && server.length < 5);
+    if (isCatastrophicWipe) {
+      console.warn(`Lio: Circuit breaker tripped in reconcileFromServer — refusing to delete ${doomed.length} of ${local.size} local nodes.`);
+      await log({
+        kind: "error",
+        title: "Reconciliation paused: Safety threshold triggered",
+        detail: `Server mismatch would delete ${doomed.length} bookmarks. Operation halted to protect your data.`,
+      });
+      return;
+    }
     const depthOf = (id: string): number => {
       let d = 0; let cur: string | null | undefined = id;
       while (cur && d < 64) { cur = local.get(cur)?.parentId ?? null; d += 1; }
@@ -617,6 +629,10 @@ async function setKnownServerIds(ids: string[]): Promise<void> {
   await browser.storage.local.set({ [KNOWN_IDS_KEY]: ids });
 }
 
+export async function clearKnownServerIds(): Promise<void> {
+  await browser.storage.local.remove(KNOWN_IDS_KEY);
+}
+
 export async function bootstrap(
   mode: "merge" | "server" | "browser"
 ): Promise<{ pulled: number; pushed: number; matched: number; ambiguous: number; removedFromServer: number }> {
@@ -752,22 +768,27 @@ async function bootstrapBrowserAuthoritative(pullServerOnly: boolean): Promise<{
     merge_from: mergeFrom.get(n.id) ?? null,
   }));
 
-  // Server rows with no counterpart in the merged browser: redundant duplicate
-  // folders (merge), or server-only links the user chose to drop (browser-wins).
-  // Deepest-first so a folder goes after its children.
-  const browserIds = new Set(allLocal.map((n) => n.id));
-  const adopted = new Set(mergeFrom.values());
-  const depthOnServer = (id: string): number => {
-    let d = 0; let cur: string | null = serverById.get(id)?.parent_id ?? null;
-    while (cur && serverById.has(cur) && d < 64) { d += 1; cur = serverById.get(cur)?.parent_id ?? null; }
-    return d;
-  };
-  const toDelete = serverRows
-    .map((n) => n.id)
-    .filter((id) => !adopted.has(id) && !browserIds.has(id) && !protectedIds.has(id))
-    .sort((a, b) => depthOnServer(b) - depthOnServer(a));
-  for (const id of toDelete) ops.push({ op: "delete", node_id: id, timestamp: ts });
-
+  // In "merge" mode, a merge is strictly additive (union): NEVER emit deletes
+  // to the server. Deletions on the server are only allowed in "browser" (browser-wins)
+  // mode where pullServerOnly is false.
+  const toDelete: string[] = [];
+  if (!pullServerOnly) {
+    const browserIds = new Set(allLocal.map((n) => n.id));
+    const adopted = new Set(mergeFrom.values());
+    const depthOnServer = (id: string): number => {
+      let d = 0; let cur: string | null = serverById.get(id)?.parent_id ?? null;
+      while (cur && serverById.has(cur) && d < 64) { d += 1; cur = serverById.get(cur)?.parent_id ?? null; }
+      return d;
+    };
+    const serverDroppable = serverRows
+      .map((n) => n.id)
+      .filter((id) => !adopted.has(id) && !browserIds.has(id) && !protectedIds.has(id))
+      .sort((a, b) => depthOnServer(b) - depthOnServer(a));
+    for (const id of serverDroppable) {
+      toDelete.push(id);
+      ops.push({ op: "delete", node_id: id, timestamp: ts });
+    }
+  }
   if (ops.length) await api.pushDelta(cfg.deviceId, ops).catch(() => null);
 
   // Record the converged server id set so the repair step trusts it next cycle.
@@ -852,23 +873,14 @@ export async function pushLocalOnlyNodes(): Promise<{
     return d;
   };
 
-  // Local nodes the server KNEW and no longer has: the deletion happened
-  // server-side and this browser has not applied it yet. Deepest-first so a
-  // folder is removed after its children.
-  const localDoomed: { id: string; depth: number }[] = [];
-
+  // In Git-style synchronization, a local node missing from the server is NEVER
+  // assumed to be a server deletion. Deletions on the browser are ONLY performed by
+  // explicit tombstone deltas (op: 'delete') received in syncTransaction / applyRemoteChange,
+  // or an explicit user-initiated 'resync' (reconcileFromServer).
+  // Therefore, pushLocalOnlyNodes NEVER infers or applies local deletions from set differences.
   for (const n of inScopeNodes) {
     const s = serverById.get(n.id);
     if (!s) {
-      // THE FORK described above. `known` is the last observed server id set, so
-      // it is the only thing that distinguishes "never sent" from "deleted on the
-      // server". Pushing a create for the second case resurrects the row and
-      // silently undoes the user's deletion — which is what happened when a
-      // server-side delete during a pause came back on resume.
-      if (known.has(n.id)) {
-        localDoomed.push({ id: n.id, depth: depthOfLocal(n.id) });
-        continue;
-      }
       localOnly.push({
         id: n.id,
         parentId: n.parentId,
@@ -918,21 +930,7 @@ export async function pushLocalOnlyNodes(): Promise<{
     }
   }
 
-  // Apply the server's deletions locally, deepest-first, under the apply guard so
-  // the removals are not re-queued as local edits.
   let appliedLocalDeletes = 0;
-  if (localDoomed.length) {
-    localDoomed.sort((a, b) => b.depth - a.depth);
-    await withApplyGuard(async () => {
-      for (const d of localDoomed) {
-        const gone = await browser.bookmarks
-          .removeTree(d.id)
-          .then(() => true)
-          .catch(() => browser.bookmarks.remove(d.id).then(() => true).catch(() => false));
-        if (gone) appliedLocalDeletes += 1;
-      }
-    });
-  }
 
   // Apply server-authored placements locally, shallowest-first so a parent is in
   // place before its children are positioned into it. Under the apply guard, so
@@ -965,21 +963,10 @@ export async function pushLocalOnlyNodes(): Promise<{
   const protectedIds = new Set<string>(["0", "1", "2", "3"]);
   for (const id of protectedIds) localIdSet.add(id);
 
-  // Check server nodes in sync scope that no longer exist in Chrome.
-  // If this browser previously synced them (known.has(s.id)), the user deleted
-  // them locally in Chrome. Push a delete op to the server so the mirror reflects it.
+  // In Git-style synchronization, deletions from the browser to the server are ONLY
+  // authored by explicit user deletion events recorded in onRemoved.
+  // We NEVER infer server-side deletions by set subtraction.
   const serverDeletes: DeltaOp[] = [];
-  for (const s of server) {
-    if (s.id && !localIdSet.has(s.id) && !protectedIds.has(s.id) && (await inSyncScope(s.id, s.parent_id))) {
-      if (known.has(s.id)) {
-        serverDeletes.push({
-          op: "delete",
-          node_id: s.id,
-          timestamp: ts,
-        });
-      }
-    }
-  }
 
   localOnly.sort((a, b) => a.depth - b.depth); // parents before children
   const createOps: DeltaOp[] = localOnly.map((m) => ({
@@ -1028,7 +1015,6 @@ export async function pushLocalOnlyNodes(): Promise<{
 
   const updatedKnown = new Set(serverIds);
   for (const op of serverDeletes) updatedKnown.delete(op.node_id);
-  for (const d of localDoomed) updatedKnown.delete(d.id);
   for (const n of localOnly) updatedKnown.add(n.id);
   await setKnownServerIds([...updatedKnown]);
   return { pushed, deletedLocally: appliedLocalDeletes, unresolved: 0 };
