@@ -124,6 +124,33 @@ function CollectionCard({ c }: { c: CollectionSummary }) {
   const [armed, setArmed] = useState<Armed>(null);
   const [editing, setEditing] = useState(false);
   const [rotated, setRotated] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [showPairingFallback, setShowPairingFallback] = useState(false);
+  const [cardCopyError, setCardCopyError] = useState("");
+
+  const pairingCode = useMemo(() => {
+    try {
+      return formatConnectionString({ endpoint: window.location.origin, token: c.token });
+    } catch {
+      return "";
+    }
+  }, [c.token]);
+
+  const copyPairingCode = async () => {
+    if (!pairingCode) return;
+    const ok = await copyToClipboard(pairingCode);
+    if (ok) {
+      setCardCopyError("");
+      setShowPairingFallback(false);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    } else {
+      setCopiedCode(false);
+      setShowPairingFallback(true);
+      setCardCopyError("Could not copy automatically. Select and copy the pairing code below:");
+    }
+  };
+
   const rename = useMutation({
     mutationFn: (name: string) => admin.renameCollection(c.id, name),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["collections"] }),
@@ -180,11 +207,31 @@ function CollectionCard({ c }: { c: CollectionSummary }) {
           />
           {rotated && <span className="pill pill-ok absolute -top-2 right-2 !py-0 !text-[10px]">new</span>}
         </div>
+        <IconBtn
+          label={copiedCode ? "Copied pairing code!" : "Copy pairing code"}
+          tone={copiedCode ? "green" : "plain"}
+          onClick={copyPairingCode}
+        >
+          {copiedCode ? <CheckIcon /> : <CopyIcon />}
+        </IconBtn>
         <IconBtn label="Rotate token" tone="orange" pressed={armed === "rotate"}
           onClick={() => setArmed(armed === "rotate" ? null : "rotate")}>
           <RotateIcon />
         </IconBtn>
       </div>
+      {showPairingFallback && pairingCode && (
+        <div role="status" aria-live="polite" className="fade-up">
+          <p className="text-[11px] text-orange mb-1">{cardCopyError}</p>
+          <input
+            readOnly
+            value={pairingCode}
+            onFocus={(e) => e.currentTarget.select()}
+            autoFocus
+            aria-label="Pairing code"
+            className="field font-mono !text-cyan text-xs w-full"
+          />
+        </div>
+      )}
 
       {/* 3 — Bookmarks | Open Tabs, evenly spaced */}
       <div className="grid grid-cols-2 gap-2">
@@ -310,11 +357,11 @@ function NameField({ name, editing, pending, onStart, onDone }: {
 }
 
 function IconBtn({ label, onClick, tone, pressed, children }: {
-  label: string; onClick: () => void; tone: "plain" | "orange" | "red";
+  label: string; onClick: () => void; tone: "plain" | "orange" | "red" | "green";
   pressed?: boolean; children: React.ReactNode;
 }) {
   const variant =
-    tone === "red" ? "btn-danger" : tone === "orange" ? "btn-warn" : "btn-ghost";
+    tone === "red" ? "btn-danger" : tone === "orange" ? "btn-warn" : tone === "green" ? "btn-ghost !text-green" : "btn-ghost";
   return (
     <button title={label} aria-label={label} aria-pressed={pressed}
       onClick={onClick} className={`${variant} btn-sm btn-icon shrink-0`}>
@@ -328,6 +375,21 @@ const _ic = {
   strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const,
 };
 function RotateIcon() { return <svg {..._ic}><path d="M21 12a9 9 0 1 1-2.6-6.4" /><path d="M21 3v6h-6" /></svg>; }
+function CopyIcon() {
+  return (
+    <svg {..._ic}>
+      <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    </svg>
+  );
+}
+function CheckIcon() {
+  return (
+    <svg {..._ic}>
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
 function TrashIcon() { return <svg {..._ic}><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" /></svg>; }
 function PencilIcon() { return <svg {..._ic}><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>; }
 
