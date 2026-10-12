@@ -420,34 +420,11 @@ export async function reconcileFromServer(): Promise<{
   const idRemap: { localId: string; serverId: string }[] = [];
 
   await withApplyGuard(async () => {
-    // -- 1. delete local nodes the server no longer has ---------------------
-    // CIRCUIT BREAKER: Never wipe large numbers of bookmarks or wipe an entire tree
-    // automatically. If the difference represents more than 15% of local bookmarks
-    // or if the server tree is suspiciously empty/smaller than local, abort and fail closed.
-    const doomed = [...local.keys()].filter((id) => !serverById.has(id) && !protectedIds.has(id));
-    const isCatastrophicWipe = (local.size > 10 && doomed.length > 5 && doomed.length > local.size * 0.15) ||
-                               (local.size > 20 && server.length < 5);
-    if (isCatastrophicWipe) {
-      console.warn(`Lio: Circuit breaker tripped in reconcileFromServer — refusing to delete ${doomed.length} of ${local.size} local nodes.`);
-      await log({
-        kind: "error",
-        title: "Reconciliation paused: Safety threshold triggered",
-        detail: `Server mismatch would delete ${doomed.length} bookmarks. Operation halted to protect your data.`,
-      });
-      return;
-    }
-    const depthOf = (id: string): number => {
-      let d = 0; let cur: string | null | undefined = id;
-      while (cur && d < 64) { cur = local.get(cur)?.parentId ?? null; d += 1; }
-      return d;
-    };
-    doomed.sort((a, b) => depthOf(b) - depthOf(a));
-    for (const id of doomed) {
-      const ok = await browser.bookmarks.removeTree(id)
-        .catch(() => browser.bookmarks.remove(id).then(() => true).catch(() => false));
-      if (ok !== false) deleted += 1;
-    }
-
+    // In Git-style synchronization, automatic reconciliation is strictly ADDITIVE:
+    // Server nodes the browser lacks are pulled down; titles, URLs, and positions are aligned.
+    // Local browser nodes missing from the server are NEVER automatically deleted by a resync marker.
+    // Deletions on the browser happen ONLY when an explicit tombstone delete delta is delivered.
+    // Therefore, deleted is always 0.
     // -- 2. create server nodes the browser lacks, parents first ------------
     const missing = server.filter((n) => !local.has(n.id) && !protectedIds.has(n.id));
     const depthOnServer = (n: ServerNodeRow): number => {
@@ -930,8 +907,6 @@ export async function pushLocalOnlyNodes(): Promise<{
     }
   }
 
-  let appliedLocalDeletes = 0;
-
   // Apply server-authored placements locally, shallowest-first so a parent is in
   // place before its children are positioned into it. Under the apply guard, so
   // these moves are not observed as local edits and pushed straight back up.
@@ -998,13 +973,7 @@ export async function pushLocalOnlyNodes(): Promise<{
       });
     }
   }
-  if (appliedLocalDeletes > 0) {
-    await log({
-      kind: "synced",
-      title: `Applied ${appliedLocalDeletes} server-side deletion${appliedLocalDeletes === 1 ? "" : "s"} to this browser`,
-      detail: "The server removed them, so they were removed here rather than pushed back.",
-    });
-  }
+
   if (appliedServerMoves > 0) {
     await log({
       kind: "synced",
@@ -1017,7 +986,7 @@ export async function pushLocalOnlyNodes(): Promise<{
   for (const op of serverDeletes) updatedKnown.delete(op.node_id);
   for (const n of localOnly) updatedKnown.add(n.id);
   await setKnownServerIds([...updatedKnown]);
-  return { pushed, deletedLocally: appliedLocalDeletes, unresolved: 0 };
+  return { pushed, deletedLocally: 0, unresolved: 0 };
 }
 
 async function applyRemoteChange(change: DeltaChange): Promise<void> {

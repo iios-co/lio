@@ -1552,7 +1552,17 @@ def reorganize(
             ),
         )
 
-        # -- 6. one marker delta -----------------------------------------
+        # -- 6. explicit tombstone deltas for removed nodes ------------------
+        for nid in doomed:
+            conn.execute(
+                """
+                INSERT INTO delta_log (cid, op, node_id, payload_json, timestamp, origin)
+                VALUES (?, 'delete', ?, ?, ?, 'web-ui')
+                """,
+                (cid, nid, json.dumps({"op": "delete", "node_id": nid, "timestamp": ts}), ts),
+            )
+
+        # -- 7. one marker delta for rearrangement ---------------------------
         sv = _emit_resync(
             conn,
             cid,
