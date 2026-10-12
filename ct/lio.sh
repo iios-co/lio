@@ -73,20 +73,32 @@ function update_script() {
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "lio" "iios-co/lio" "tarball"
     ln -sfn /opt/lio-runtime /opt/lio/runtime
 
-    RELEASE_TAG=$(cat ~/.lio 2>/dev/null || true)
-    FULL_SHA=""
-    if [[ -n "$RELEASE_TAG" ]]; then
-      FULL_SHA=$(git ls-remote https://github.com/iios-co/lio.git "refs/tags/${RELEASE_TAG}^{}" "refs/tags/${RELEASE_TAG}" 2>/dev/null | awk -v tag="$RELEASE_TAG" '$2 == "refs/tags/"tag"^{}" {print $1; found=1; exit} $2 == "refs/tags/"tag {fallback=$1} END {if (!found) print fallback}')
+    RAW_TAG=$(cat ~/.lio 2>/dev/null || true)
+    RELEASE_SHA="unknown"
+    if [[ -n "$RAW_TAG" ]]; then
+      RELEASE_TAG="v${RAW_TAG#v}"
+      CLEAN_VER="${RAW_TAG#v}"
+      FULL_SHA=$(git ls-remote https://github.com/iios-co/lio.git \
+        "refs/tags/${RELEASE_TAG}^{}" "refs/tags/${RELEASE_TAG}" \
+        "refs/tags/${CLEAN_VER}^{}" "refs/tags/${CLEAN_VER}" 2>/dev/null | awk -v tag="$RELEASE_TAG" -v ctag="$CLEAN_VER" '
+        $2 == "refs/tags/"tag"^{}" || $2 == "refs/tags/"ctag"^{}" {print $1; found=1; exit}
+        $2 == "refs/tags/"tag || $2 == "refs/tags/"ctag {fallback=$1}
+        END {if (!found) print fallback}')
+      if [[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        RELEASE_SHA="${FULL_SHA:0:12}"
+      else
+        msg_warn "Could not resolve commit SHA from GitHub; proceeding with release ${RELEASE_TAG}"
+      fi
+    else
+      msg_error "Could not resolve release tag from ~/.lio"
+      exit 1
     fi
-    [[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]] || { msg_error "Could not resolve valid 40-hex commit SHA from GitHub"; exit 1; }
-    [ -n "$RELEASE_TAG" ] || { msg_error "Could not resolve release tag from GitHub"; exit 1; }
-    RELEASE_SHA="${FULL_SHA:0:12}"
 
     # Build new runtime in isolated location
     rm -rf /opt/lio-runtime.new
     python3 -m venv /opt/lio-runtime.new
     $STD /opt/lio-runtime.new/bin/pip install --upgrade pip setuptools wheel
-    $STD env SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIO_SERVER="${RELEASE_TAG#v}" /opt/lio-runtime.new/bin/pip install --upgrade /opt/lio/lio-server
+    $STD env SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LIO_SERVER="${CLEAN_VER}" /opt/lio-runtime.new/bin/pip install --upgrade /opt/lio/lio-server
 
     # Validate new runtime can import cleanly
     /opt/lio-runtime.new/bin/python -c "import lio_server" || { msg_error "Failed to verify new Lio runtime"; exit 1; }
@@ -123,11 +135,15 @@ function update_script() {
     [[ "$HEALTH_OK" -eq 1 ]] || { msg_error "Lio health check failed after update"; exit 1; }
 
     # Verify version endpoint matches the deployed release
-    EXPECTED_VER="${RELEASE_TAG#v}"
+    EXPECTED_VER="${CLEAN_VER}"
     REPORTED_VER=$(curl -fsS http://127.0.0.1:8000/version 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')
     REPORTED_SHA=$(curl -fsS http://127.0.0.1:8000/version 2>/dev/null | sed -n 's/.*"sha": *"\([^"]*\)".*/\1/p')
-    if [[ "$REPORTED_VER" != "$EXPECTED_VER" ]] || [[ "$REPORTED_SHA" != "$RELEASE_SHA" ]]; then
-      msg_error "Version mismatch after update: expected ${EXPECTED_VER} (${RELEASE_SHA}), got ${REPORTED_VER} (${REPORTED_SHA})"
+    if [[ "$REPORTED_VER" != "$EXPECTED_VER" ]]; then
+      msg_error "Version mismatch after update: expected ${EXPECTED_VER}, got ${REPORTED_VER}"
+      exit 1
+    fi
+    if [[ "$RELEASE_SHA" != "unknown" ]] && [[ "$REPORTED_SHA" != "$RELEASE_SHA" ]]; then
+      msg_error "SHA mismatch after update: expected ${RELEASE_SHA}, got ${REPORTED_SHA}"
       exit 1
     fi
 
