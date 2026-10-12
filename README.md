@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="assets/server-logo.svg" width="128" height="128" alt="Lio Logo" />
-</p>
+# lio (link input output) <img width="128" height="128" alt="icon-128" src="https://github.com/user-attachments/assets/16e3c614-e78c-4fc1-bbd8-466ac39775cb" />
 
-# Lio
+
 
 > **Self-hostable, deterministic cross-browser bookmark and tab synchronization.**
 
