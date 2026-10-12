@@ -21,6 +21,8 @@ scratch/
 
 release/
 *.zip
+*.pem
+*.crx
 # Test & tooling caches
 .pytest_cache/
 .ruff_cache/

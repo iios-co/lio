@@ -11,6 +11,7 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
+    "crx": "node scripts/pack-crx.mjs",
     "postinstall": "wxt prepare",
     "test": "node --import ./tests/register-hooks.mjs --test tests/*.test.mjs"
   },

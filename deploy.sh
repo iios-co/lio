@@ -19,7 +19,7 @@ log "Running pre-flight verification gate..."
 
 log "Building packaged browser extension release bundles..."
 mkdir -p release
-rm -f release/*.zip
+rm -f release/*.zip release/*.crx
 
 (
   cd lio-plugin
@@ -27,13 +27,15 @@ rm -f release/*.zip
   VERSION=$(node -p "require('./package.json').version")
   BUILD_BUMP=0 npm run zip
   BUILD_BUMP=0 npm run zip:firefox
+  BUILD_BUMP=0 npm run crx
   [ -f ".output/lio-plugin-${VERSION}-chrome.zip" ] || die "Chrome bundle not found at .output/lio-plugin-${VERSION}-chrome.zip"
   [ -f ".output/lio-plugin-${VERSION}-firefox.zip" ] || die "Firefox bundle not found at .output/lio-plugin-${VERSION}-firefox.zip"
+  [ -f "../release/lio-extension.crx" ] || die "CRX bundle not found at release/lio-extension.crx"
   cp ".output/lio-plugin-${VERSION}-chrome.zip" ../release/lio-extension-chrome.zip
   cp ".output/lio-plugin-${VERSION}-firefox.zip" ../release/lio-extension-firefox.zip
 )
 log "Packaged extension release artifacts:"
-ls -lh release/*.zip
+ls -lh release/*.zip release/*.crx
 
 log "Configuring Git remote for ${REPO_OWNER}/${REPO_NAME}..."
 if ! git remote | grep -q '^origin$'; then
@@ -54,7 +56,7 @@ if [ -n "$TAG" ]; then
     git push origin "$TAG"
   fi
   if command -v gh >/dev/null 2>&1; then
-    gh release create "$TAG" release/lio-extension-chrome.zip release/lio-extension-firefox.zip \
+    gh release create "$TAG" release/lio-extension.crx release/lio-extension-chrome.zip release/lio-extension-firefox.zip \
       --title "Lio ${TAG}" \
       --notes "Production release of Lio with packaged browser extension bundles." || true
   fi
