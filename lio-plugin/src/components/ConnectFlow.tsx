@@ -137,9 +137,9 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
     setServerLinks(count);
     setLocalLinks(local);
 
-    // If the server is empty there is nothing to decide — a merge and a
-    // browser-wins both just upload this browser. Skip straight to connecting.
-    if (count === 0) {
+    // If either side has 0 links, the merge union is trivial (0 + N = N).
+    // Automatically connect and merge without prompting.
+    if (count === 0 || local === 0) {
       await commit("merge");
       return;
     }
