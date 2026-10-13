@@ -309,16 +309,29 @@ If an operator needs to restore a backup:
 ```bash
 set -euo pipefail
 
-# 1. Stop service so no active connections mutate the database
+# Target backup file to restore from
+TARGET_BACKUP="${1:-/var/backups/lio/lio_target.db}"
+
+# 1. Assert backup source is an existing non-empty regular file
+if [ ! -f "$TARGET_BACKUP" ] || [ ! -s "$TARGET_BACKUP" ]; then
+  echo "Error: Backup file does not exist or is empty: $TARGET_BACKUP" >&2
+  exit 1
+fi
+
+# 2. Stop service so no active connections mutate the database
 sudo systemctl stop lio-server
 
-# 2. Restore backup into a temporary file and verify integrity BEFORE touching active files
+# 3. Restore backup into a temporary file in read-only URI mode and assert integrity
 sudo rm -f /var/lib/lio/lio_restore.db
-sudo sqlite3 /var/backups/lio/lio_target.db ".backup '/var/lib/lio/lio_restore.db'"
+sudo sqlite3 "file:${TARGET_BACKUP}?mode=ro" ".backup '/var/lib/lio/lio_restore.db'"
+
 CHECK=$(sudo sqlite3 /var/lib/lio/lio_restore.db "PRAGMA integrity_check;")
 [ "$CHECK" = "ok" ] || { echo "Database integrity check failed: $CHECK" >&2; exit 1; }
 
-# 3. Archive existing active database and sidecars (db, wal, shm) together
+TABLES=$(sudo sqlite3 /var/lib/lio/lio_restore.db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('bookmarks', 'collections');")
+[ "$TABLES" = "2" ] || { echo "Database schema validation failed (missing core tables)" >&2; exit 1; }
+
+# 4. Archive existing active database and sidecars (db, wal, shm) together
 INCIDENT_DIR="/var/backups/lio/incident_$(date +%Y%m%d_%H%M%S)"
 sudo mkdir -p "$INCIDENT_DIR"
 sudo cp -a /var/lib/lio/lio.db "$INCIDENT_DIR/lio.db"
@@ -330,12 +343,12 @@ if [ -f /var/lib/lio/lio.db-shm ]; then
 fi
 sudo rm -f /var/lib/lio/lio.db /var/lib/lio/lio.db-wal /var/lib/lio/lio.db-shm
 
-# 4. Atomically move verified database into place and set ownership
+# 5. Atomically move verified database into place and set ownership
 sudo mv /var/lib/lio/lio_restore.db /var/lib/lio/lio.db
 sudo chown lio:lio /var/lib/lio/lio.db
 sudo chmod 0640 /var/lib/lio/lio.db
 
-# 5. Start service
+# 6. Start service
 sudo systemctl start lio-server
 ```
 ### Authoritative Collection Baseline Restore API
