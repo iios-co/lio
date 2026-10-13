@@ -1,7 +1,7 @@
 {
   "name": "lio-plugin",
   "private": true,
-  "version": "0.4.157",
+  "version": "0.4.159",
   "type": "module",
   "scripts": {
     "dev": "wxt",

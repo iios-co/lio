@@ -38,8 +38,8 @@ export function CollectionsDashboard({ onLogout }: Props) {
   return (
     <div className="min-h-full">
       <header className="sticky top-0 z-20 border-b border-border bg-[color-mix(in_srgb,var(--bg)_75%,transparent)] backdrop-blur-xl">
-        <div className="max-w-6xl mx-auto px-5 py-3.5 flex items-center justify-between">
-          <Logo size={34} />
+        <div className="max-w-6xl mx-auto px-5 py-2.5 flex items-center justify-between">
+          <Logo size={24} withWordmark={false} />
           <div className="flex items-center gap-3">
             <BuildStamp />
             <button onClick={async () => { await admin.logout(); onLogout(); }}
@@ -51,32 +51,34 @@ export function CollectionsDashboard({ onLogout }: Props) {
       </header>
 
       <main className="max-w-6xl mx-auto px-5 py-7">
-        <div className="mb-7">
-          <h1 className="text-lg font-semibold text-fg mb-0.5">Collections</h1>
-          <p className="text-sm text-fg-subtle">
-            Each collection has its own sync token. Create one, then paste its token into the browser extension.
-          </p>
-        </div>
+        <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+          <div>
+            <h1 className="text-lg font-semibold text-fg mb-0.5">Collections</h1>
+            <p className="text-sm text-fg-subtle">
+              Each collection has its own sync token. Create one, then paste its token into the browser extension.
+            </p>
+          </div>
 
-        <div className="glass rounded-2xl p-3 mb-6 flex items-center gap-2">
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !create.isPending) {
-                create.mutate(newName.trim() || "Personal");
-              }
-            }}
-            placeholder="New collection name — e.g. Personal, Work, Research"
-            className="field flex-1 !bg-transparent !border-transparent"
-          />
-          <button
-            onClick={() => create.mutate(newName.trim() || "Personal")}
-            disabled={create.isPending}
-            className="btn-primary"
-          >
-            {create.isPending ? "Creating…" : "Create"}
-          </button>
+          <div className="glass rounded-2xl p-3 flex items-center gap-2">
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !create.isPending) {
+                  create.mutate(newName.trim() || "Personal");
+                }
+              }}
+              placeholder="New collection name — e.g. Personal, Work, Research"
+              className="field flex-1 !bg-transparent !border-transparent"
+            />
+            <button
+              onClick={() => create.mutate(newName.trim() || "Personal")}
+              disabled={create.isPending}
+              className="btn-primary"
+            >
+              {create.isPending ? "Creating…" : "Create"}
+            </button>
+          </div>
         </div>
 
         {revealed && (

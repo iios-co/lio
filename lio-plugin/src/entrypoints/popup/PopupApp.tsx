@@ -131,7 +131,7 @@ export function PopupApp() {
           aria-label={sync?.globalEnabled ? "Pause syncing" : "Resume syncing"}
           aria-pressed={!sync?.globalEnabled}
           title={sync?.globalEnabled ? "Pause syncing" : "Resume syncing"}>
-          <Logo size={26} active={busy} />
+          <Logo size={20} withWordmark={false} active={busy} />
         </button>
         <span className="text-[10px] font-mono text-fg-subtle">v{status.version}</span>
         <span className="w-[7px] h-[7px] rounded-full" title={gateClosed ? "Sync stopped" : "Syncing"} style={{
