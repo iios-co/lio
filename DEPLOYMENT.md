@@ -14,9 +14,7 @@ This document defines the formal deployment and operational specification for **
 │   - Local bookmark event hooks             - Offline operation queue   │
 │   - Tab session boundary tracking          - WebSocket push consumer   │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP(S) + WSS
-                                    │ Direct: Port 8787 (Debian) or 8000 (Proxmox LXC)
-                                    │ Via Proxy: Port 443 (HTTPS) / 80 (HTTP)
+                                    │ HTTPS / WSS (:443) or HTTP (:80)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                     REVERSE PROXY / INGRESS LAYER                      │
@@ -25,7 +23,7 @@ This document defines the formal deployment and operational specification for **
 │   - TLS Termination                                                    │
 │   - WebSocket Upgrade (Connection: Upgrade)                            │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP (127.0.0.1:8787 or container:8000)
+                                    │ HTTP / WS (:8787 or :8000 in LXC)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                          LIO SERVER RUNTIME                            │
@@ -360,15 +358,120 @@ sudo systemctl start lio-server
 
 ---
 
-## 8. Client Extension Distribution & Updates
+## 8. Build, Packaging & GitHub Release Deployment
 
-### Extension Packages
-Release artifacts are built and published on GitHub Releases:
-- **`lio-extension-chrome.zip`**: Chrome, Brave, Edge, Opera (Manifest V3, unpackable).
-- **`lio-extension.crx`**: Packaged Chromium extension with persistent public key.
-- **`lio-extension-firefox.zip` / `lio-extension.xpi`**: Firefox, Floorp, Zen (Manifest V2, installable via `about:addons`).
+This section details the exact procedures for versioning, building production bundles, packaging the CRX extension, and publishing releases to GitHub under **`iios-co`**.
 
-### Client Connection Payload
+### 1. Version Authority & Synchronization
+
+Lio uses unified semantic versioning (`major.minor.patch`) across the client extension and backend server:
+- **Primary Version Authority**: `lio-plugin/package.json` defines the canonical release version (e.g. `0.4.157`).
+- **Release Tag**: Git tags must strictly match `v${PACKAGE_VERSION}` (e.g. `v0.4.157`).
+- **Server Version Resolution**: `lio-server` dynamically resolves its runtime release version from the active Git tag (`git describe --tags --always`) or `LIO_RELEASE_VERSION` environment variable.
+- **Manifest Version Pinning**: During production releases, always pass `BUILD_BUMP=0` to freeze the patch version and prevent automated build counter drift.
+
+### 2. CRX Private Signing Key Specification
+
+To package the signed Chromium CRX (`release/lio-extension.crx`) with a stable, persistent extension ID across browser updates:
+- `scripts/pack-crx.mjs` resolves the private RSA key from one of three sources (in order):
+  1. `CRX_KEY_PATH`: Path to an external `.pem` key file.
+  2. `CRX_KEY_BASE64`: Base64-encoded string of the `.pem` key file (standard for CI/CD environments).
+  3. Local file `lio-plugin/key.pem`: Local development signing key (**strictly gitignored; never committed**).
+- If no key is provided, the packaging script fails closed and halts the release pipeline.
+
+### 3. Automated Release Pipeline (`./deploy.sh`)
+
+The repository provides a single-command release automation script `deploy.sh`:
+
+```bash
+# Check CLI authentication
+gh auth status
+
+# Publish a production release matching the current package version:
+VERSION=$(node -p "require('./lio-plugin/package.json').version")
+./deploy.sh "v${VERSION}"
+```
+
+**Release Invariants Enforced by `deploy.sh`**:
+1. **Tag Validation**: Requires `vX.Y.Z` format matching `lio-plugin/package.json` exactly.
+2. **Remote Origin Setup**: Sets or updates `origin` to `https://github.com/iios-co/lio.git`.
+3. **Tag Collision Prevention**: Fetches remote tags and halts if `vX.Y.Z` already exists on GitHub.
+4. **Prerequisite Check**: Validates `gh` CLI presence, GitHub authentication, and CRX signing key availability.
+5. **Working Tree Guard**: Asserts git working tree is clean before starting.
+6. **Pre-flight Gate**: Executes `BUILD_BUMP=0 ./verify.sh` (127 server tests, 88 plugin tests, 36 web tests, 50/50 e2e browser assertions).
+7. **Tracked Asset Reconciliation**: Commits freshly compiled `lio-server/lio_server/web_dist/` assets if rebuild drift occurred during verification.
+8. **Artifact Packaging**: Clears `.output/` and builds all 4 production bundles with `BUILD_BUMP=0`:
+   - `release/lio-extension.crx`
+   - `release/lio-extension-chrome.zip`
+   - `release/lio-extension-firefox.zip`
+   - `release/lio-extension.xpi`
+9. **Asset Integrity Check**: Asserts all 4 release files are present and non-empty.
+10. **Git Push & Tag**: Pushes the active branch, tags `vX.Y.Z`, and pushes the tag to GitHub.
+11. **GitHub Release Publication**: Executes `gh release create "v${VERSION}" release/*` and verifies the published release view.
+
+### 4. Manual Release Procedure (Step-by-Step Runbook)
+
+If performing a release manually without `deploy.sh`:
+
+```bash
+set -euo pipefail
+
+# 1. Determine canonical version
+VERSION=$(node -p "require('./lio-plugin/package.json').version")
+TAG="v${VERSION}"
+
+# 2. Verify git status and gh authentication
+[ -z "$(git status --porcelain)" ] || { echo "Working tree dirty"; exit 1; }
+gh auth status
+
+# 3. Run pre-flight verification gate
+BUILD_BUMP=0 ./verify.sh
+
+# Commit any updated web_dist assets generated by verify
+if ! git diff --quiet lio-server/lio_server/web_dist/; then
+  git add lio-server/lio_server/web_dist/
+  git commit -m "chore(release): update web_dist for ${TAG}"
+fi
+
+# 4. Package extension release bundles
+mkdir -p release
+rm -f release/*.zip release/*.crx release/*.xpi
+(
+  cd lio-plugin
+  rm -rf .output
+  BUILD_BUMP=0 npm run zip
+  BUILD_BUMP=0 npm run zip:firefox
+  BUILD_BUMP=0 npm run crx
+  cp ".output/lio-plugin-${VERSION}-chrome.zip" ../release/lio-extension-chrome.zip
+  cp ".output/lio-plugin-${VERSION}-firefox.zip" ../release/lio-extension-firefox.zip
+  cp ".output/lio-plugin-${VERSION}-firefox.zip" ../release/lio-extension.xpi
+)
+
+# Assert all 4 files are generated
+for f in release/lio-extension.crx release/lio-extension-chrome.zip release/lio-extension-firefox.zip release/lio-extension.xpi; do
+  [ -s "$f" ] || { echo "Missing asset: $f"; exit 1; }
+done
+
+# 5. Push branch and release tag to GitHub
+git remote set-url origin https://github.com/iios-co/lio.git
+git push origin main
+git tag -a "$TAG" -m "Release $TAG"
+git push origin "$TAG"
+
+# 6. Publish release on GitHub
+gh release create "$TAG" \
+  release/lio-extension.crx \
+  release/lio-extension-chrome.zip \
+  release/lio-extension-firefox.zip \
+  release/lio-extension.xpi \
+  --title "Lio ${TAG}" \
+  --notes "Production release of Lio with packaged browser extension bundles."
+
+# 7. Verify release publication
+gh release view "$TAG"
+```
+
+### 5. Client Connection Payload Specification
 Connecting an extension to a self-hosted instance uses a standard base64 connection string:
 
 ```text
@@ -383,7 +486,6 @@ Where the decoded payload contains:
 }
 ```
 This payload can be copied directly from the collection card in the Web Console and pasted into the extension setup screen.
-
 ---
 
 ## 9. Verification & Acceptance Criteria
