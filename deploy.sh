@@ -28,7 +28,6 @@ EXPECTED_TAG="v${PKG_VER}"
 if [ "$TAG" != "$EXPECTED_TAG" ]; then
   die "Tag mismatch: requested tag is '$TAG', but lio-plugin/package.json is at '$PKG_VER' (expected '$EXPECTED_TAG')"
 fi
-
 log "Checking release prerequisites..."
 command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required to publish releases. Install gh first."
 gh auth status >/dev/null 2>&1 || die "GitHub CLI is not authenticated. Run 'gh auth login' before releasing."
