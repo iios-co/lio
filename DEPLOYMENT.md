@@ -317,11 +317,7 @@ if [ ! -f "$TARGET_BACKUP" ] || [ ! -s "$TARGET_BACKUP" ]; then
   echo "Error: Backup file does not exist or is empty: $TARGET_BACKUP" >&2
   exit 1
 fi
-
-# 2. Stop service so no active connections mutate the database
-sudo systemctl stop lio-server
-
-# 3. Restore backup into a temporary file in read-only URI mode and assert integrity
+# 2. Restore backup into a temporary file in read-only URI mode and assert integrity
 sudo rm -f /var/lib/lio/lio_restore.db
 sudo sqlite3 "file:${TARGET_BACKUP}?mode=ro" ".backup '/var/lib/lio/lio_restore.db'"
 
@@ -330,6 +326,9 @@ CHECK=$(sudo sqlite3 /var/lib/lio/lio_restore.db "PRAGMA integrity_check;")
 
 TABLES=$(sudo sqlite3 /var/lib/lio/lio_restore.db "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('bookmarks', 'collections');")
 [ "$TABLES" = "2" ] || { echo "Database schema validation failed (missing core tables)" >&2; exit 1; }
+
+# 3. Stop service only after the restored database is fully validated
+sudo systemctl stop lio-server
 
 # 4. Archive existing active database and sidecars (db, wal, shm) together
 INCIDENT_DIR="/var/backups/lio/incident_$(date +%Y%m%d_%H%M%S)"
@@ -351,8 +350,8 @@ sudo chmod 0640 /var/lib/lio/lio.db
 # 6. Start service
 sudo systemctl start lio-server
 ```
+
 ### Authoritative Collection Baseline Restore API
-When a client holds valid bookmarks but the server database was wiped or holds stale tombstones:
 1. Open the Lio extension popup.
 2. The popup detects the conflict and renders **"Restore browser as baseline"**.
 3. Confirming sends a transactional payload to `/api/v1/collections/{token}/bookmarks/restore-baseline`.
