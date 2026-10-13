@@ -84,7 +84,7 @@ Lio is configured via environment variables, typically loaded from `/etc/lio/lio
 | `LIO_PORT` | Integer | `8787` | TCP port for the server process (default Proxmox LXC uses `8000`). |
 | `LIO_DB_PATH` | Path | `lio.db` | Absolute path to SQLite database file. Production standard: `/var/lib/lio/lio.db`. |
 | `LIO_ADMIN_USERNAME` | String | `admin` | Administrative login username for the Web Console. |
-| `LIO_ADMIN_PASSWORD` | String | *Empty* | Admin password hash or plaintext (auto-hashed on start). If empty, first-run wizard prompts in UI. |
+| `LIO_ADMIN_PASSWORD` | String | *Empty* | Plaintext environment override, compared directly at login via `hmac.compare_digest`. If unset, the server checks the stored hash in SQLite (configured via first-run web setup or CLI `python -m lio_server --set-admin admin <password>`). |
 | `LIO_SESSION_SECRET` | String | *Random* | Secret key used to sign HMAC-SHA256 session cookies. Defaults to a per-process ephemeral key if unset. |
 | `LIO_COOKIE_SECURE` | Boolean | `0` | If `1`, cookies require HTTPS (`Secure` flag). Set `0` for plain HTTP LAN environments. |
 | `LIO_AUTO_PROVISION` | Boolean | `0` | If `1`, unknown bearer tokens automatically mint new collections. Keep `0` in production. |
@@ -148,14 +148,22 @@ sudo bash /tmp/lio-install.sh
 rm -f /tmp/lio-install.sh
 ```
 
-#### Filesystem Layout
-- Application Root: `/opt/lio/current/`
-- Runtime Virtualenv: `/opt/lio-runtime/` (symlinked from `/opt/lio/runtime`)
-- Persistent State: `/var/lib/lio/lio.db` (owned by `lio:lio`, mode `0750`)
-- Environment File: `/etc/lio/lio.env` (owned by `root:lio`, mode `0640`)
-- Service Unit: `/etc/systemd/system/lio-server.service`
+#### Filesystem & Runtime Layouts
+Lio supports two production deployment layouts:
 
-#### Systemd Service Unit Specification
+1. **Debian / Ubuntu Bare Metal (`debian-install.sh`)**:
+   - Release Root: `/opt/lio/releases/<version>/`
+   - Active Release Symlink: `/opt/lio/current`
+   - Runtime Virtualenv: `/opt/lio/current/runtime/`
+   - Systemd Service Binary: `/opt/lio/current/runtime/bin/python -m lio_server`
+
+2. **Proxmox VE LXC Container (`ct/lio.sh`)**:
+   - Persistent Runtime: `/opt/lio-runtime/` (symlinked from `/opt/lio/runtime`)
+   - Systemd Service Binary: `/opt/lio-runtime/bin/python -m lio_server`
+
+Both runtime layouts store active database state in `/var/lib/lio/lio.db` (owned by `lio:lio`, mode `0640`) and runtime environment configuration in `/etc/lio/lio.env` (owned by `root:lio`, mode `0640`).
+
+#### Systemd Service Unit Specification (`/etc/systemd/system/lio-server.service`)
 
 ```ini
 [Unit]
@@ -172,7 +180,7 @@ EnvironmentFile=-/etc/lio/lio.env
 Environment=LIO_DB_PATH=/var/lib/lio/lio.db
 Environment=LIO_HOST=0.0.0.0
 Environment=LIO_PORT=8787
-ExecStart=/opt/lio-runtime/bin/python -m lio_server
+ExecStart=/opt/lio/current/runtime/bin/python -m lio_server
 Restart=always
 RestartSec=3
 
@@ -192,77 +200,6 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 ```
-
----
-
-### Method 3: Containerfile / Docker
-
-For containerized platforms (Docker, Podman, Kubernetes), build and run the standardized OCI container:
-
-#### Dockerfile
-```dockerfile
-FROM python:3.12-slim-bookworm
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    LIO_HOST=0.0.0.0 \
-    LIO_PORT=8787 \
-    LIO_DB_PATH=/var/lib/lio/lio.db
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    sqlite3 ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -u 1000 -U lio && \
-    mkdir -p /var/lib/lio /etc/lio /app && \
-    chown -R lio:lio /var/lib/lio /etc/lio /app
-
-WORKDIR /app
-COPY --chown=lio:lio lio-server/ /app/
-
-USER lio
-RUN python3 -m venv /app/.venv && \
-    /app/.venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /app/.venv/bin/pip install --no-cache-dir /app
-
-VOLUME ["/var/lib/lio", "/etc/lio"]
-EXPOSE 8787
-
-HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
-  CMD curl -f http://127.0.0.1:8787/healthz || exit 1
-
-CMD ["/app/.venv/bin/python", "-m", "lio_server"]
-```
-
-#### Docker Compose (`docker-compose.yml`)
-```yaml
-version: "3.8"
-
-services:
-  lio:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: lio-server
-    restart: unless-stopped
-    ports:
-      - "8787:8787"
-    environment:
-      - LIO_HOST=0.0.0.0
-      - LIO_PORT=8787
-      - LIO_ADMIN_USERNAME=admin
-      - LIO_ADMIN_PASSWORD=change_this_password
-      - LIO_COOKIE_SECURE=0
-      - LIO_DEADLINK_ALLOW_PRIVATE=1
-    volumes:
-      - lio-data:/var/lib/lio
-      - lio-config:/etc/lio
-
-volumes:
-  lio-data:
-  lio-config:
-```
-
 ---
 
 ## 5. Reverse Proxy & Network Specification
@@ -356,10 +293,14 @@ sqlite3 /var/lib/lio/lio.db ".backup '/var/backups/lio/lio_$(date +%Y%m%d_%H%M%S
 ```
 
 ### Automated Nightly Backup Cron
-Add to `/etc/cron.d/lio-backup`:
-
+Create the backup directory with appropriate service user ownership:
 ```bash
-0 2 * * * lio mkdir -p /var/backups/lio && sqlite3 /var/lib/lio/lio.db ".backup '/var/backups/lio/lio_\$(date +\%F).db'" && find /var/backups/lio -name "*.db" -mtime +14 -delete
+sudo install -d -o lio -g lio -m 0750 /var/backups/lio
+```
+
+Add to `/etc/cron.d/lio-backup`:
+```cron
+0 2 * * * lio sqlite3 /var/lib/lio/lio.db ".backup '/var/backups/lio/lio_$(date +\%F).db'" && find /var/backups/lio -name "*.db" -mtime +14 -delete
 ```
 
 ### Server-Side Emergency Recovery Runbook
@@ -372,6 +313,7 @@ set -euo pipefail
 sudo systemctl stop lio-server
 
 # 2. Restore backup into a temporary file and verify integrity BEFORE touching active files
+sudo rm -f /var/lib/lio/lio_restore.db
 sudo sqlite3 /var/backups/lio/lio_target.db ".backup '/var/lib/lio/lio_restore.db'"
 CHECK=$(sudo sqlite3 /var/lib/lio/lio_restore.db "PRAGMA integrity_check;")
 [ "$CHECK" = "ok" ] || { echo "Database integrity check failed: $CHECK" >&2; exit 1; }
@@ -380,9 +322,14 @@ CHECK=$(sudo sqlite3 /var/lib/lio/lio_restore.db "PRAGMA integrity_check;")
 INCIDENT_DIR="/var/backups/lio/incident_$(date +%Y%m%d_%H%M%S)"
 sudo mkdir -p "$INCIDENT_DIR"
 sudo cp -a /var/lib/lio/lio.db "$INCIDENT_DIR/lio.db"
-[ -f /var/lib/lio/lio.db-wal ] && sudo cp -a /var/lib/lio/lio.db-wal "$INCIDENT_DIR/"
-[ -f /var/lib/lio/lio.db-shm ] && sudo cp -a /var/lib/lio/lio.db-shm "$INCIDENT_DIR/"
+if [ -f /var/lib/lio/lio.db-wal ]; then
+  sudo cp -a /var/lib/lio/lio.db-wal "$INCIDENT_DIR/"
+fi
+if [ -f /var/lib/lio/lio.db-shm ]; then
+  sudo cp -a /var/lib/lio/lio.db-shm "$INCIDENT_DIR/"
+fi
 sudo rm -f /var/lib/lio/lio.db /var/lib/lio/lio.db-wal /var/lib/lio/lio.db-shm
+
 # 4. Atomically move verified database into place and set ownership
 sudo mv /var/lib/lio/lio_restore.db /var/lib/lio/lio.db
 sudo chown lio:lio /var/lib/lio/lio.db
