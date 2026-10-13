@@ -194,7 +194,7 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="w-96 p-4 fade-up">
-      <div className="grid place-items-center mb-2"><Logo size={36} /></div>
+      <div className="grid place-items-center mb-2"><Logo size={24} withWordmark={false} /></div>
       <h1 className="text-sm font-semibold text-fg mb-1 text-center">Connect a collection</h1>
       <p className="text-[11px] text-fg-subtle mb-4 text-center">
         Link this browser to a self-hosted lio-server collection.
