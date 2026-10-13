@@ -13,7 +13,7 @@ import {
   type SyncBatchRequest,
   type DeltaChange,
 } from "./api";
-import { getConfig, getSyncConfig, setWatermark, nextClientSequence, type SyncConfig } from "./config";
+import { getConfig, getSyncConfig, setSyncConfig, setWatermark, nextClientSequence, type SyncConfig } from "./config";
 import { enqueue, enqueueBatch, peek, acknowledge, size as queueSize } from "./queue";
 import { checkGate, resetGate } from "./gate";
 import { log } from "./log";
@@ -788,6 +788,89 @@ async function bootstrapBrowserAuthoritative(pullServerOnly: boolean): Promise<{
     removedFromServer: toDelete.length,
   };
 }
+export async function restoreBaselineFromLocal(label = "Restore browser as baseline"): Promise<{
+  restored: number; server_version: number;
+}> {
+  // Read current sync config and collect in-scope local nodes using active pairs
+  const currentSync = await getSyncConfig();
+  const roots = (await browser.bookmarks.getTree()) as BNodeLike[];
+  // Keep pair-level enabled filtering intact by forcing globalEnabled: true
+  const scopeFilter = buildScopeFilter(roots, { ...currentSync, globalEnabled: true });
+  const inScope = walkInScope(roots, scopeFilter);
+
+  if (inScope.length === 0) {
+    throw new Error("Local in-scope tree is empty. Refusing to restore an empty baseline.");
+  }
+
+  // Pause sync fail-closed before any network calls
+  await setSyncConfig({ globalEnabled: false });
+
+  const treeRes = await api.getTree();
+  const initialNodes = (treeRes?.nodes ?? []) as ServerNodeRow[];
+  const expectedActive = initialNodes.length;
+  const expectedVersion = treeRes?.server_version ?? 0;
+
+  const nodesPayload = inScope.map((n) => ({
+    id: n.id,
+    parent_id: n.parentId,
+    position: n.index,
+    title: n.title,
+    url: n.url,
+    is_folder: n.isFolder,
+    date_added: n.dateAdded,
+  }));
+
+  const res = await api.restoreBaseline({
+    label,
+    expected_server_version: expectedVersion,
+    expected_active_count: expectedActive,
+    nodes: nodesPayload,
+  });
+
+  if (!res || res.restored !== nodesPayload.length) {
+    throw new Error(`Server failed to restore expected node count: submitted ${nodesPayload.length}, restored ${res?.restored}`);
+  }
+
+  // Exact verification: Verify that EVERY submitted node exists on the server with matching attributes,
+  // and that any unrelated pre-existing active server nodes were preserved.
+  const verifiedTree = await api.getTree();
+  const verifiedNodes = (verifiedTree?.nodes ?? []) as ServerNodeRow[];
+  const verifiedById = new Map(verifiedNodes.map((n) => [n.id, n]));
+
+  for (const local of inScope) {
+    const s = verifiedById.get(local.id);
+    if (!s) {
+      throw new Error(`Baseline verification failed: submitted node ${local.id} (${local.title}) missing on server.`);
+    }
+    if (
+      s.title !== local.title ||
+      (s.url ?? null) !== (local.url ?? null) ||
+      Boolean(s.is_folder) !== Boolean(local.isFolder) ||
+      (s.parent_id ?? null) !== (local.parentId ?? null) ||
+      s.position !== local.index
+    ) {
+      throw new Error(`Baseline verification mismatch for node ${local.id}: attributes differ.`);
+    }
+  }
+  // Verify unrelated pre-existing active nodes remain active
+  const submittedIdSet = new Set(nodesPayload.map((n) => n.id));
+  for (const initial of initialNodes) {
+    if (!submittedIdSet.has(initial.id) && !verifiedById.has(initial.id)) {
+      throw new Error(`Baseline verification failed: pre-existing active node ${initial.id} was accidentally lost.`);
+    }
+  }
+
+  await setWatermark(res.server_timestamp, res.server_version);
+  await setKnownServerIds(verifiedNodes.map((n) => n.id));
+  await browser.storage.local.remove("recoveryRequired");
+  await log({
+    kind: "synced",
+    title: `Restored ${res.restored} bookmarks as server baseline`,
+    detail: `Tombstones superseded. Authoritative baseline version is ${res.server_version}.`,
+  });
+
+  return { restored: res.restored, server_version: res.server_version };
+}
 
 interface BNodeLike {
   id: string;
@@ -959,19 +1042,50 @@ export async function pushLocalOnlyNodes(): Promise<{
   const ops = [...createOps, ...realignMoves, ...serverDeletes];
   let pushed = 0;
   if (ops.length > 0) {
-    const ok = await api.pushDelta(cfg.deviceId, ops).catch(() => null);
-    if (ok) {
-      pushed = localOnly.length;
-      const parts: string[] = [];
-      if (pushed > 0) parts.push(`sent ${pushed} missing bookmark${pushed === 1 ? "" : "s"}`);
-      if (realignMoves.length > 0) parts.push(`realigned ${realignMoves.length} position${realignMoves.length === 1 ? "" : "s"}`);
-      if (serverDeletes.length > 0) parts.push(`removed ${serverDeletes.length} bookmark${serverDeletes.length === 1 ? "" : "s"} from the server`);
-      await log({
-        kind: "synced",
-        title: `Repaired server divergence: ${parts.join(", ")}`,
-        detail: "Found by comparing this browser against the server.",
-      });
+    const res = await api.pushDelta(cfg.deviceId, ops).catch(() => null);
+    if (!res) {
+      return { pushed: 0, deletedLocally: 0, unresolved: ops.length };
     }
+    const applied = res.applied ?? 0;
+    const skipped = res.skipped_stale ?? 0;
+
+    // REJECTION-AWARE CIRCUIT BREAKER:
+    // If the server rejected operations due to tombstones or staleness, we must NEVER
+    // falsely claim success, must NOT mark rejected nodes as known, and must halt the
+    // repair cycle to prevent infinite ping-pong retry loops.
+    if (skipped > 0 || applied < ops.length) {
+      console.warn(`Lio: server rejected ${skipped} of ${ops.length} ops (${applied} applied). Halting repair cycle.`);
+      const localLinks = inScopeNodes.filter((n) => !n.isFolder).length;
+      await browser.storage.local.set({
+        recoveryRequired: {
+          reason: "tombstone_rejection",
+          applied,
+          skipped,
+          localNodeCount: inScopeNodes.length,
+          localLinkCount: localLinks,
+          serverNodeCount: server.length,
+          timestamp: Date.now(),
+        },
+      });
+      await log({
+        kind: "error",
+        title: `Sync paused: Server rejected ${skipped} bookmark changes`,
+        detail: `The server holds tombstones or conflicting state for ${skipped} items. Paused to prevent a sync loop.`,
+      });
+      // Pause sync to break any automated retry loop
+      await setSyncConfig({ globalEnabled: false });
+      return { pushed: 0, deletedLocally: 0, unresolved: skipped };
+    }
+
+    pushed = localOnly.length;
+    const parts: string[] = [];
+    if (pushed > 0) parts.push(`sent ${pushed} missing bookmark${pushed === 1 ? "" : "s"}`);
+    if (realignMoves.length > 0) parts.push(`realigned ${realignMoves.length} position${realignMoves.length === 1 ? "" : "s"}`);
+    await log({
+      kind: "synced",
+      title: `Repaired server divergence: ${parts.join(", ")}`,
+      detail: "Found by comparing this browser against the server.",
+    });
   }
 
   if (appliedServerMoves > 0) {

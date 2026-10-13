@@ -10,6 +10,7 @@ import {
   parseConnectionString,
   saveSettingsDraftField,
 } from "@/lib/drafts";
+import { resolvePopupBannerMode } from "@/lib/popupBanner";
 interface Status {
   ok: boolean; configured: boolean; reachable: boolean | null; lastError: string | null;
   // tokenValid: true = the server recognises this token and named the collection.
@@ -54,6 +55,15 @@ interface Status {
     differences: number;
     detail: string;
   }> | null;
+  recoveryRequired?: {
+    reason: string;
+    applied: number;
+    skipped: number;
+    localNodeCount: number;
+    localLinkCount: number;
+    serverNodeCount: number;
+    timestamp: number;
+  } | null;
 }
 interface FolderInfo { id: string; title: string; depth: number }
 interface Session { device_id: string; device_name: string; updated_at: number; tab_count: number }
@@ -137,12 +147,53 @@ export function PopupApp() {
         </div>
       </div>
 
-      {!sync?.globalEnabled && !gateClosed && (
-        <button onClick={toggleGlobal} className="w-full mb-3 py-2 rounded-lg text-[11px] font-bold uppercase tracking-widest"
-          style={{ background: "color-mix(in srgb, var(--red) 12%, transparent)", border: "1px solid var(--red)", color: "var(--red)" }}>
-          Sync paused — tap to resume
-        </button>
-      )}
+      {(() => {
+        const bannerMode = resolvePopupBannerMode({
+          globalEnabled: !!sync?.globalEnabled,
+          gateClosed,
+          recoveryRequired: status.recoveryRequired,
+        });
+        if (bannerMode === "hidden") return null;
+        return (
+          <div className="mb-3 space-y-2">
+            {bannerMode === "recovery" ? (
+              <div className="p-2.5 rounded-lg border border-red/40 bg-red/10 space-y-2 text-left">
+                <p className="text-[11.5px] font-semibold text-red leading-tight">
+                  Server Conflict Detected
+                </p>
+                <p className="text-[11px] text-fg-subtle leading-normal">
+                  The server holds tombstones rejecting {status.recoveryRequired?.skipped} items (Browser: {status.recoveryRequired?.localLinkCount} links, Server: {status.recoveryRequired?.serverNodeCount} active).
+                </p>
+                <button
+                  onClick={async () => {
+                    const msg = `Restore this browser's ${status.recoveryRequired?.localLinkCount ?? ""} bookmarks as the authoritative collection baseline?\n\nThis will supersede any server-side tombstones. Sync will remain paused after restore until you manually resume.`;
+                    if (!window.confirm(msg)) return;
+                    const r = await send<{ ok: boolean; restored?: number; error?: string }>({
+                      type: "RESTORE_BASELINE",
+                      confirmed: true,
+                      label: "Manual restore from browser popup",
+                    });
+                    if (r?.ok) {
+                      setNotice(`Restored ${r.restored ?? "all"} bookmarks as authoritative baseline.`);
+                      void refresh();
+                    } else {
+                      setNotice(`Baseline restore failed: ${r?.error ?? "Unknown error"}`);
+                    }
+                  }}
+                  className="w-full py-1.5 rounded text-[11px] font-bold uppercase tracking-wider bg-blue text-white hover:opacity-90 transition-opacity text-center shadow-sm"
+                >
+                  Restore browser as baseline
+                </button>
+              </div>
+            ) : (
+              <button onClick={toggleGlobal} className="w-full py-2 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-opacity hover:opacity-90"
+                style={{ background: "color-mix(in srgb, var(--red) 12%, transparent)", border: "1px solid var(--red)", color: "var(--red)" }}>
+                Sync paused — tap to resume
+              </button>
+            )}
+          </div>
+        );
+      })()}
       {notice && <p className="text-[11.5px] leading-snug text-red mb-2.5">{notice}</p>}
       {status.reachable && <p className="hidden" />}
 

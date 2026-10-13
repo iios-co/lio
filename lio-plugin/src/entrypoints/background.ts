@@ -7,6 +7,7 @@ import {
   onCreated, onChanged, onMoved, onRemoved, syncTransaction,
   invalidateScopeCache, listFolders, fullPushInScope, inSyncScope, pushLocalOnlyNodes,
   bootstrap, drainBookmarkEvents, setBookmarkSyncRequester, clearKnownServerIds, reconcileFromServer,
+  restoreBaselineFromLocal,
 } from "@/lib/bookmarks";
 import {
   diffTrees, describeDiff, linkCount, localNodes, folderNodes, serverNodes, type LeafRef,
@@ -193,7 +194,7 @@ export default defineBackground(() => {
     type?: string; deviceId?: string; pair?: SyncPair; pairId?: string; enabled?: boolean;
     endpoint?: string; token?: string;
     bootstrapMode?: "merge" | "server" | "browser";
-    historyId?: number;
+    historyId?: number; confirmed?: boolean; label?: string;
   }, _s, sendResponse) => {
     void (async () => {
       try {
@@ -205,7 +206,7 @@ export default defineBackground(() => {
             // watching, and a cached verdict is exactly how a stale "connected"
             // state got shown after going offline.
             const gate = configured ? await checkGate(true) : null;
-            const { lastSyncOkAt, lastSyncError } = await browser.storage.local.get(["lastSyncOkAt", "lastSyncError"]);
+            const { lastSyncOkAt, lastSyncError, recoveryRequired } = await browser.storage.local.get(["lastSyncOkAt", "lastSyncError", "recoveryRequired"]);
             const tabPush = await lastTabPush();
             const live = await localTabs();
 
@@ -360,6 +361,7 @@ export default defineBackground(() => {
               queued: await queueSize(),
               version: browser.runtime.getManifest().version,
               pairStats,
+              recoveryRequired: recoveryRequired ?? null,
             });
             break;
           }
@@ -531,9 +533,30 @@ export default defineBackground(() => {
             break;
           }
           case "TOGGLE_GLOBAL": {
-            const next = await setSyncConfig({ globalEnabled: !!msg.enabled });
-            if (next.globalEnabled) void runSync();
-            sendResponse({ ok: true, sync: next });
+            await setSyncConfig({ globalEnabled: !!msg.enabled });
+            if (msg.enabled) await runSync();
+            const current = await getSyncConfig();
+            sendResponse({ ok: true, sync: current });
+            break;
+          }
+          case "RESTORE_BASELINE": {
+            if (!msg.confirmed) {
+              sendResponse({ ok: false, error: "Confirmation required to restore baseline." });
+              break;
+            }
+            const { recoveryRequired } = (await browser.storage.local.get("recoveryRequired")) as {
+              recoveryRequired?: { reason?: string } | null;
+            };
+            if (!recoveryRequired || recoveryRequired.reason !== "tombstone_rejection") {
+              sendResponse({ ok: false, error: "No active tombstone rejection incident requires baseline restore." });
+              break;
+            }
+            try {
+              const r = await restoreBaselineFromLocal(msg.label || "Restore browser as baseline");
+              sendResponse({ ok: true, restored: r.restored, server_version: r.server_version });
+            } catch (e) {
+              sendResponse({ ok: false, error: (e as Error).message || String(e) });
+            }
             break;
           }
           case "GET_LOG": {

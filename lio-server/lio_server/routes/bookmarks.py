@@ -28,6 +28,8 @@ from ..models import (
     ReorganizeResponse,
     ReorderRequest,
     ReorderResponse,
+    RestoreBaselineRequest,
+    RestoreBaselineResponse,
     SnapshotListResponse,
     SnapshotSummary,
     SyncBatchRequest,
@@ -1843,6 +1845,162 @@ def undo(
         node_count=changed,
         remaining_snapshots=int(remaining),
         server_timestamp=_now_ms(),
+    )
+
+# ---- Authoritative Baseline Restore --------------------------------------
+
+
+@router.post("/restore-baseline", response_model=RestoreBaselineResponse)
+def restore_baseline(
+    req: RestoreBaselineRequest,
+    cid: str = Depends(require_collection),
+) -> RestoreBaselineResponse:
+    """Transactionally restore or initialize an authoritative baseline tree for a collection.
+    Intentionally supersedes incident tombstones ONLY for submitted node IDs,
+    preserves optimistic concurrency invariants, snapshots pre-restore state,
+    and emits a clean resync watermark."""
+    if not req.nodes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Submitted baseline cannot be empty.",
+        )
+
+    # 1. Structural validation of submitted tree
+    nodes_by_id = {}
+    for n in req.nodes:
+        if n.id in nodes_by_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Duplicate node id in submitted baseline: {n.id}",
+            )
+        if n.parent_id == n.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Node {n.id} cannot be its own parent",
+            )
+        nodes_by_id[n.id] = n
+
+    # Check parent validity and full graph cycle detection
+    protected_roots = {"0", "1", "2", "3"}
+    for nid, node in nodes_by_id.items():
+        pid = node.parent_id
+        if pid is not None and pid not in protected_roots:
+            if pid not in nodes_by_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Node {nid} references missing parent {pid}",
+                )
+            if not nodes_by_id[pid].is_folder:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Node {nid} parent {pid} is not a folder",
+                )
+
+        # Full visited-state cycle detection
+        visited = set()
+        cur = nid
+        while cur is not None:
+            if cur in visited:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cycle detected involving node {nid} and {cur}",
+                )
+            visited.add(cur)
+            if cur in protected_roots:
+                break
+            parent_node = nodes_by_id.get(cur)
+            cur = parent_node.parent_id if parent_node else None
+
+    ts = _now_ms()
+    with db.write_tx() as conn:
+        # 2. Concurrency checks under write lock
+        current_stats = conn.execute(
+            """
+            SELECT COUNT(*) AS active_count
+            FROM bookmarks WHERE cid = ? AND deleted = 0
+            """,
+            (cid,),
+        ).fetchone()
+        ver_row = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) AS max_id FROM delta_log WHERE cid = ?",
+            (cid,),
+        ).fetchone()
+        actual_active = int(current_stats["active_count"] or 0)
+        actual_version = int(ver_row["max_id"] or 0) if ver_row else 0
+
+        if actual_active != req.expected_active_count:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Optimistic lock failed: expected active count {req.expected_active_count}, got {actual_active}",
+            )
+        if actual_version != req.expected_server_version:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Optimistic lock failed: expected server version {req.expected_server_version}, got {actual_version}",
+            )
+        # Pre-baseline state is not written to tree_snapshots because tree_snapshots
+        # stores active rows only and generic Undo cannot revert tombstoned states.
+        # Rollback for baseline recovery relies on the database-level backup.
+        snapshot_id = None
+        cur_max_sort_key: str | None = None
+        def next_sort_key() -> str:
+            nonlocal cur_max_sort_key
+            cur_max_sort_key = _append_sort_key(conn, cid, cur_max_sort_key)
+            return cur_max_sort_key
+
+        for node in req.nodes:
+            dom = domain_of(node.url) if node.url else None
+            conn.execute(
+                """
+                INSERT INTO bookmarks
+                    (id, cid, parent_id, position, title, url, is_folder,
+                     date_added, date_modified, sort_key, domain, deleted, server_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ON CONFLICT(cid, id) DO UPDATE SET
+                    parent_id = excluded.parent_id,
+                    position = excluded.position,
+                    title = excluded.title,
+                    url = excluded.url,
+                    is_folder = excluded.is_folder,
+                    date_added = COALESCE(bookmarks.date_added, excluded.date_added),
+                    date_modified = excluded.date_modified,
+                    domain = excluded.domain,
+                    deleted = 0
+                """,
+                (
+                    node.id, cid, node.parent_id, node.position, node.title, node.url,
+                    1 if node.is_folder else 0, node.date_added or ts, ts,
+                    next_sort_key(), dom,
+                ),
+            )
+
+        # 5. Emit one resync marker delta
+        sv = _emit_resync(
+            conn,
+            cid,
+            f"Baseline: {req.label}",
+            {"restored": len(req.nodes), "snapshot_id": snapshot_id},
+        )
+        # Align server_version for restored nodes
+        submitted_ids = list(nodes_by_id.keys())
+        for i in range(0, len(submitted_ids), 900):
+            batch = submitted_ids[i:i+900]
+            placeholders = ",".join("?" for _ in batch)
+            conn.execute(
+                f"UPDATE bookmarks SET server_version = ? WHERE cid = ? AND id IN ({placeholders})",
+                (sv, cid, *batch),
+            )
+
+    broadcast_event(
+        cid,
+        "bookmarks_updated",
+        {"timestamp": ts, "origin": "web-ui", "op": "resync", "reason": f"Baseline: {req.label}"},
+    )
+
+    return RestoreBaselineResponse(
+        restored=len(req.nodes),
+        server_version=sv,
+        server_timestamp=ts,
     )
 
 

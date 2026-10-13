@@ -168,6 +168,15 @@ export const api = {
     ),
   pushVisits: (increments: VisitIncrement[]) =>
     request<{ applied: number; unknown_nodes: number }>("POST", "/bookmarks/visits", { increments }),
+  restoreBaseline: (body: {
+    label: string;
+    expected_server_version: number;
+    expected_active_count: number;
+    nodes: Array<{ id: string; parent_id?: string | null; position?: number; title: string; url?: string | null; is_folder?: boolean }>;
+  }) =>
+    request<{ restored: number; server_version: number; server_timestamp: number }>(
+      "POST", "/bookmarks/restore-baseline", body
+    ),
   putSession: (
     deviceId: string,
     deviceName: string,

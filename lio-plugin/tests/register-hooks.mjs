@@ -10,14 +10,19 @@ import { fileURLToPath } from "node:url";
 
 registerHooks({
   resolve(specifier, context, next) {
-    const relative = specifier.startsWith("./") || specifier.startsWith("../");
-    const hasExt = /\.[cm]?[jt]sx?$/i.test(specifier);
-    if (relative && !hasExt && context.parentURL) {
-      const candidateUrl = new URL(`${specifier}.ts`, context.parentURL);
-      if (candidateUrl.protocol === "file:" && existsSync(fileURLToPath(candidateUrl))) {
-        return next(`${specifier}.ts`, context);
+    let target = specifier;
+    if (target.startsWith("@/")) {
+      target = new URL(`../src/${target.slice(2)}`, import.meta.url).pathname;
+    }
+    const relative = target.startsWith("./") || target.startsWith("../") || target.startsWith("/");
+    const hasExt = /\.[cm]?[jt]sx?$/i.test(target);
+    if (relative && !hasExt) {
+      const base = target.startsWith("/") ? new URL(`file://${target}`) : new URL(target, context.parentURL);
+      const candidateUrl = new URL(`${base.pathname}.ts`, "file://");
+      if (existsSync(fileURLToPath(candidateUrl))) {
+        return next(candidateUrl.href, context);
       }
     }
-    return next(specifier, context);
+    return next(target, context);
   },
 });

@@ -263,6 +263,29 @@ class DeleteNodeResponse(BaseModel):
     node_ids: list[str]
 
 
+class RestoreBaselineNodeIn(BaseModel):
+    """A single node in the authoritative submitted baseline tree."""
+    id: str
+    parent_id: str | None = None
+    position: int = Field(0, ge=0)
+    title: str = Field("", max_length=4096)
+    url: str | None = Field(None, max_length=4096)
+    is_folder: bool = False
+    date_added: int | None = None
+
+
+class RestoreBaselineRequest(BaseModel):
+    """Explicitly restore or initialize a complete authoritative baseline tree,
+    intentionally superseding any accidental/incident tombstones for the submitted IDs."""
+    label: str = Field(..., max_length=120, description="Audit reason for restore, e.g. 'Restore from Chrome backup'")
+    expected_server_version: int = Field(..., ge=0, description="Optimistic lock: current server_version must match.")
+    expected_active_count: int = Field(..., ge=0, description="Optimistic lock: current undeleted node count must match.")
+    nodes: list[RestoreBaselineNodeIn] = Field(..., max_length=5000)
+
+class RestoreBaselineResponse(BaseModel):
+    restored: int
+    server_version: int
+    server_timestamp: int
 # ---- Bulk reorganize ------------------------------------------------------
 
 

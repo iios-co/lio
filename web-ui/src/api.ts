@@ -321,6 +321,15 @@ export const coll = {
   /** Restore a snapshot, visit counts included. */
   undo: (token: string, snapshotId?: number): Promise<UndoResult> =>
     collReq(token, `/bookmarks/undo${snapshotId ? `?snapshot_id=${snapshotId}` : ""}`, { method: "POST" }),
+
+  /** Restore or initialize an authoritative baseline tree superseding tombstones. */
+  restoreBaseline: (token: string, body: {
+    label: string;
+    expected_server_version: number;
+    expected_active_count: number;
+    nodes: Array<{ id: string; parent_id?: string | null; position?: number; title: string; url?: string | null; is_folder?: boolean }>;
+  }): Promise<{ restored: number; server_version: number; server_timestamp: number }> =>
+    collReq(token, `/bookmarks/restore-baseline`, { method: "POST", body: JSON.stringify(body) }),
 };
 
 export { ApiError };
