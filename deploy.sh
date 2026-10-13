@@ -33,6 +33,10 @@ log "Checking release prerequisites..."
 command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required to publish releases. Install gh first."
 gh auth status >/dev/null 2>&1 || die "GitHub CLI is not authenticated. Run 'gh auth login' before releasing."
 
+if git ls-files --error-unmatch lio-plugin/key.pem >/dev/null 2>&1; then
+  die "Security violation: lio-plugin/key.pem is tracked by git. Untrack it before releasing."
+fi
+
 if [ ! -f "lio-plugin/key.pem" ] && [ -z "${CRX_KEY_PATH:-}" ] && [ -z "${CRX_KEY_BASE64:-}" ]; then
   die "Missing CRX private signing key. Provide CRX_KEY_PATH, CRX_KEY_BASE64, or place key.pem in lio-plugin/"
 fi
@@ -55,12 +59,10 @@ log "Checking git working tree before build..."
 log "Running pre-flight verification gate (BUILD_BUMP=0)..."
 BUILD_BUMP=0 ./verify.sh || die "Pre-flight verification failed. Fix errors before deploying."
 
-if ! git diff --quiet; then
-  log "Staging and committing fresh build artifacts produced by verify..."
-  git add lio-server/lio_server/web_dist/
-  git commit -m "chore(release): update production web_dist for ${TAG}"
+if ! git diff --quiet lio-server/lio_server/web_dist/; then
+  die "Verification produced uncommitted changes in lio-server/lio_server/web_dist/. Run 'cd web-ui && npm run build', review, and commit before releasing."
 fi
-[ -z "$(git status --porcelain)" ] || die "Working tree has untracked or unstaged files after verify."
+[ -z "$(git status --porcelain)" ] || die "Working tree has untracked or unstaged files after verify. Clean tree before release."
 
 log "Building packaged browser extension release bundles..."
 mkdir -p release
