@@ -1,0 +1,448 @@
+# Lio Deployment Specification
+
+This document defines the formal deployment and operational specification for **Lio** (Link Input Output), covering architecture, server runtime, containerization, environment configuration, networking, security hardening, disaster recovery, and browser extension deployment.
+
+---
+
+## 1. System Architecture & Topology
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        CLIENT EXTENSION LAYER                          │
+│                                                                        │
+│   Chrome / Brave / Edge (Manifest V3)      Firefox (Manifest V2)       │
+│   - Local bookmark event hooks             - Offline operation queue   │
+│   - Tab session boundary tracking          - WebSocket push consumer   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ HTTP(S) + WSS
+                                    │ Port 8787 (or 8000 via proxy)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                     REVERSE PROXY / INGRESS LAYER                      │
+│                                                                        │
+│   Nginx / Caddy / Traefik (Optional for LAN; Mandatory for WAN/HTTPS) │
+│   - TLS Termination                                                    │
+│   - WebSocket Upgrade (Connection: Upgrade)                            │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ HTTP (127.0.0.1 or internal LAN)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          LIO SERVER RUNTIME                            │
+│                                                                        │
+│   Uvicorn + FastAPI (Python >= 3.12)                                   │
+│   - Serves API routes: /api/v1/...                                     │
+│   - Serves embedded Web Management Console (web_dist/ SPA)             │
+│   - Native WebSockets: /api/v1/collections/{token}/events             │
+│   - Serialized write transactions via db.write_tx()                    │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ POSIX File Lock
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                         PERSISTENCE STORAGE                            │
+│                                                                        │
+│   SQLite 3.37+ in WAL Mode (/var/lib/lio/lio.db)                       │
+│   - PRAGMA journal_mode = WAL                                          │
+│   - PRAGMA foreign_keys = ON                                           │
+│   - PRAGMA busy_timeout = 5000                                         │
+│   - Tables: collections, bookmarks, delta_log, device_tabs, etc.       │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Boundaries
+- **Server (`lio-server`)**: Standalone Python service running on Uvicorn. Embeds its own production-compiled Single Page Application (SPA) in `lio_server/web_dist/`. Requires **zero Node.js or npm runtime** on the host.
+- **Database (`lio.db`)**: Single-file relational storage with Write-Ahead Logging (WAL). Concurrent reads proceed without locking; writes are serialized via application-level context managers and SQLite locks.
+- **Client Extensions (`lio-plugin`)**: Run inside browser worker contexts. Maintain a local FIFO event queue and sync coordinator to coalesce operations.
+
+---
+
+## 2. Resource Requirements & Prerequisites
+
+### Minimum Hardware Sizing
+| Resource | Minimum | Recommended (Multi-user / Multi-device) |
+| :--- | :--- | :--- |
+| **CPU** | 1 vCPU (x86_64 or aarch64) | 2 vCPU |
+| **RAM** | 512 MB | 1024 MB (1 GB) |
+| **Disk** | 2 GB SSD | 5 GB SSD |
+| **Network** | 10 Mbps LAN / WAN | 100 Mbps+ LAN |
+
+### Software Prerequisites
+- **Operating System**: Debian 12/13, Ubuntu 22.04/24.04 LTS, or Proxmox VE 8.x (LXC unprivileged).
+- **Python**: `>= 3.12` (with `python3-venv` and `sqlite3` support).
+- **SQLite**: `>= 3.37.0` (with JSON1 extension support enabled by default in Python 3.12).
+
+---
+
+## 3. Configuration Specification
+
+Lio is configured via environment variables, typically loaded from `/etc/lio/lio.env` or passed via container environment blocks.
+
+### Environment Variable Reference
+
+| Variable | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `LIO_HOST` | String | `127.0.0.1` | Network interface to bind. Use `0.0.0.0` for containers or direct LAN access. |
+| `LIO_PORT` | Integer | `8787` | TCP port for the server process (default Proxmox LXC uses `8000`). |
+| `LIO_DB_PATH` | Path | `lio.db` | Absolute path to SQLite database file. Production standard: `/var/lib/lio/lio.db`. |
+| `LIO_ADMIN_USERNAME` | String | `admin` | Administrative login username for the Web Console. |
+| `LIO_ADMIN_PASSWORD` | String | *Empty* | Admin password hash or plaintext (auto-hashed on start). If empty, first-run wizard prompts in UI. |
+| `LIO_SESSION_SECRET` | String | *Random* | Secret key used to sign HMAC-SHA256 session cookies. Defaults to a per-process ephemeral key if unset. |
+| `LIO_COOKIE_SECURE` | Boolean | `0` | If `1`, cookies require HTTPS (`Secure` flag). Set `0` for plain HTTP LAN environments. |
+| `LIO_AUTO_PROVISION` | Boolean | `0` | If `1`, unknown bearer tokens automatically mint new collections. Keep `0` in production. |
+| `LIO_ALLOWED_TOKENS` | CSV | *Empty* | Comma-separated list of allowed collection tokens. If empty, any admin-minted token is allowed. |
+| `LIO_DELTA_LOG_MAX_ROWS` | Integer | `10000` | Maximum change log operations retained per collection before pruning oldest entries. |
+| `LIO_DEADLINK_CHECK` | Boolean | `1` | Enables operator-triggered dead link verification. Zero background polling. |
+| `LIO_DEADLINK_ALLOW_PRIVATE` | Boolean | `0` | If `1`, dead-link checks may probe private RFC1918 LAN hosts. Loopback/metadata always blocked. |
+| `LIO_DEADLINK_VERIFY_SSL` | Boolean | `1` | Verifies SSL certificates during dead-link checking. Set `0` if using self-signed intranet certs. |
+
+### Production Configuration Template (`/etc/lio/lio.env`)
+
+```ini
+# Lio Production Configuration
+LIO_HOST=0.0.0.0
+LIO_PORT=8787
+LIO_DB_PATH=/var/lib/lio/lio.db
+
+# Admin Security
+LIO_ADMIN_USERNAME=admin
+LIO_ADMIN_PASSWORD=change_this_secure_admin_password
+LIO_SESSION_SECRET=generate_with_openssl_rand_hex_32
+
+# Network & Environment
+LIO_COOKIE_SECURE=0
+LIO_AUTO_PROVISION=0
+LIO_DELTA_LOG_MAX_ROWS=10000
+
+# Link Liveness
+LIO_DEADLINK_CHECK=1
+LIO_DEADLINK_ALLOW_PRIVATE=1
+LIO_DEADLINK_VERIFY_SSL=1
+```
+
+---
+
+## 4. Deployment Methods
+
+### Method 1: Proxmox VE LXC Container (Recommended for Home Labs)
+
+Proxmox VE can deploy Lio into an unprivileged Debian container using the automated community helper:
+
+```bash
+bash -c "$(wget -qLO - https://raw.githubusercontent.com/iios-co/lio/main/ct/lio.sh)"
+```
+
+- **Container Profile**: Unprivileged Debian container, 2 vCPUs, 1024 MB RAM, 4 GB SSD.
+- **Service Address**: `http://<CONTAINER_IP>:8000`
+- **Configuration**: `/etc/lio/lio.env`
+- **System Service**: `systemctl status lio-server`
+
+---
+
+### Method 2: Debian / Ubuntu Bare Metal or VPS
+
+Deploy onto a dedicated Linux VM or server using the standard system installer:
+
+```bash
+# Execute remote installer with root/sudo:
+curl -fsSL https://raw.githubusercontent.com/iios-co/lio/main/lio-server/deploy/debian-install.sh -o /tmp/lio-install.sh
+sudo bash /tmp/lio-install.sh
+rm -f /tmp/lio-install.sh
+```
+
+#### Filesystem Layout
+- Application Root: `/opt/lio/current/`
+- Runtime Virtualenv: `/opt/lio-runtime/` (symlinked from `/opt/lio/runtime`)
+- Persistent State: `/var/lib/lio/lio.db` (owned by `lio:lio`, mode `0750`)
+- Environment File: `/etc/lio/lio.env` (owned by `root:lio`, mode `0640`)
+- Service Unit: `/etc/systemd/system/lio-server.service`
+
+#### Systemd Service Unit Specification
+
+```ini
+[Unit]
+Description=Lio - Bookmark & Tab Sync Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lio
+Group=lio
+WorkingDirectory=/var/lib/lio
+EnvironmentFile=-/etc/lio/lio.env
+Environment=LIO_DB_PATH=/var/lib/lio/lio.db
+Environment=LIO_HOST=0.0.0.0
+Environment=LIO_PORT=8787
+ExecStart=/opt/lio-runtime/bin/python -m lio_server
+Restart=always
+RestartSec=3
+
+# Hardening Sandbox
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lio /etc/lio
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=1G
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
+
+### Method 3: Containerfile / Docker
+
+For containerized platforms (Docker, Podman, Kubernetes), build and run the standardized OCI container:
+
+#### Dockerfile
+```dockerfile
+FROM python:3.12-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    LIO_HOST=0.0.0.0 \
+    LIO_PORT=8787 \
+    LIO_DB_PATH=/var/lib/lio/lio.db
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sqlite3 ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 -U lio && \
+    mkdir -p /var/lib/lio /etc/lio /app && \
+    chown -R lio:lio /var/lib/lio /etc/lio /app
+
+WORKDIR /app
+COPY --chown=lio:lio lio-server/ /app/
+
+USER lio
+RUN python3 -m venv /app/.venv && \
+    /app/.venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /app/.venv/bin/pip install --no-cache-dir /app
+
+VOLUME ["/var/lib/lio", "/etc/lio"]
+EXPOSE 8787
+
+HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
+  CMD curl -f http://127.0.0.1:8787/healthz || exit 1
+
+CMD ["/app/.venv/bin/python", "-m", "lio_server"]
+```
+
+#### Docker Compose (`docker-compose.yml`)
+```yaml
+version: "3.8"
+
+services:
+  lio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lio-server
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      - LIO_HOST=0.0.0.0
+      - LIO_PORT=8787
+      - LIO_ADMIN_USERNAME=admin
+      - LIO_ADMIN_PASSWORD=change_this_password
+      - LIO_COOKIE_SECURE=0
+      - LIO_DEADLINK_ALLOW_PRIVATE=1
+    volumes:
+      - lio-data:/var/lib/lio
+      - lio-config:/etc/lio
+
+volumes:
+  lio-data:
+  lio-config:
+```
+
+---
+
+## 5. Reverse Proxy & Network Specification
+
+### Port Allocations
+- **`8787` (Default)**: Standalone native service port.
+- **`8000` (Alternative)**: Standard Proxmox LXC installation port.
+- **`ws://` / `wss://`**: Re-uses the primary HTTP port via HTTP Connection Upgrade.
+
+### Nginx Configuration Template (TLS + WebSockets)
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name lio.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/lio.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/lio.example.com/privkey.pem;
+
+    client_max_body_size 10M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+
+        # WebSocket headers
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # Upstream proxy headers
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Timeouts for real-time WebSocket connection
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}
+```
+
+### Caddyfile Template (Automatic HTTPS + WebSockets)
+
+```caddy
+lio.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+```
+
+---
+
+## 6. Security & Synchronization Invariants
+
+### 1. Synchronization Model: Strict Non-Destructive Invariants
+Lio implements a deterministic synchronization engine with hard safety rules:
+- **Zero Inferred Deletions**: Local bookmarks absent from the server are treated as uncommitted local work. The client **never** infers deletions via set difference (`Local - Server`).
+- **Authoritative Tombstones Only**: The browser removes a local bookmark **only** when an explicit `{ operation: "delete" }` tombstone is delivered from the server's change log.
+- **Additive Union on Merge**: Connecting a browser in `merge` mode is strictly additive (`toDelete = []`). It emits 0 delete deltas to the server and 0 deletions locally.
+- **Circuit Breaker on Server Rejection**: If the server rejects a batch of operations due to existing tombstones (`skipped_stale > 0`), the client immediately:
+  1. Refuses to log success.
+  2. Refuses to add unpersisted items to `knownServerIds`.
+  3. Pauses synchronization fail-closed (`globalEnabled = false`).
+  4. Surfaces a structured **"Server Conflict Detected"** banner in the extension popup.
+
+### 2. SSRF Protection (Dead-Link Checking)
+The dead-link probe engine (`routes/reports.py`) enforces strict host verification:
+- Loopback addresses (`127.0.0.0/8`, `::1`, `localhost`) are **unconditionally blocked**.
+- Cloud instance metadata addresses (`169.254.169.254`, `fd00:ec2::254`) are **unconditionally blocked**.
+- Private RFC1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are blocked unless explicitly allowed by the operator setting `LIO_DEADLINK_ALLOW_PRIVATE=1`.
+
+---
+
+## 7. Disaster Recovery & Backup Procedures
+
+### Safe Online SQLite Backup (WAL Mode)
+Because SQLite runs in WAL mode, **never copy `lio.db` with standard `cp` while the service is running**. Use SQLite's online vacuum/backup API:
+
+```bash
+# Safe online backup without stopping the service:
+sqlite3 /var/lib/lio/lio.db ".backup '/var/backups/lio/lio_$(date +%Y%m%d_%H%M%S).db'"
+```
+
+### Automated Nightly Backup Cron
+Add to `/etc/cron.d/lio-backup`:
+
+```bash
+0 2 * * * lio mkdir -p /var/backups/lio && sqlite3 /var/lib/lio/lio.db ".backup '/var/backups/lio/lio_\$(date +\%F).db'" && find /var/backups/lio -name "*.db" -mtime +14 -delete
+```
+
+### Server-Side Emergency Recovery Runbook
+If an operator needs to restore a backup:
+
+```bash
+set -euo pipefail
+
+# 1. Stop service so no active connections mutate the database
+sudo systemctl stop lio-server
+
+# 2. Restore backup into a temporary file and verify integrity BEFORE touching active files
+sudo sqlite3 /var/backups/lio/lio_target.db ".backup '/var/lib/lio/lio_restore.db'"
+CHECK=$(sudo sqlite3 /var/lib/lio/lio_restore.db "PRAGMA integrity_check;")
+[ "$CHECK" = "ok" ] || { echo "Database integrity check failed: $CHECK" >&2; exit 1; }
+
+# 3. Archive existing active database and sidecars (db, wal, shm) together
+INCIDENT_DIR="/var/backups/lio/incident_$(date +%Y%m%d_%H%M%S)"
+sudo mkdir -p "$INCIDENT_DIR"
+sudo cp -a /var/lib/lio/lio.db "$INCIDENT_DIR/lio.db"
+[ -f /var/lib/lio/lio.db-wal ] && sudo cp -a /var/lib/lio/lio.db-wal "$INCIDENT_DIR/"
+[ -f /var/lib/lio/lio.db-shm ] && sudo cp -a /var/lib/lio/lio.db-shm "$INCIDENT_DIR/"
+sudo rm -f /var/lib/lio/lio.db /var/lib/lio/lio.db-wal /var/lib/lio/lio.db-shm
+# 4. Atomically move verified database into place and set ownership
+sudo mv /var/lib/lio/lio_restore.db /var/lib/lio/lio.db
+sudo chown lio:lio /var/lib/lio/lio.db
+sudo chmod 0640 /var/lib/lio/lio.db
+
+# 5. Start service
+sudo systemctl start lio-server
+```
+### Authoritative Collection Baseline Restore API
+When a client holds valid bookmarks but the server database was wiped or holds stale tombstones:
+1. Open the Lio extension popup.
+2. The popup detects the conflict and renders **"Restore browser as baseline"**.
+3. Confirming sends a transactional payload to `/api/v1/collections/{token}/bookmarks/restore-baseline`.
+4. The server validates structural hierarchy, supersedes tombstones for submitted IDs, sets a fresh watermark, and establishes the browser as the new ground truth.
+
+---
+
+## 8. Client Extension Distribution & Updates
+
+### Extension Packages
+Release artifacts are built and published on GitHub Releases:
+- **`lio-extension-chrome.zip`**: Chrome, Brave, Edge, Opera (Manifest V3, unpackable).
+- **`lio-extension.crx`**: Packaged Chromium extension with persistent public key.
+- **`lio-extension-firefox.zip` / `lio-extension.xpi`**: Firefox, Floorp, Zen (Manifest V2, installable via `about:addons`).
+
+### Client Connection Payload
+Connecting an extension to a self-hosted instance uses a standard base64 connection string:
+
+```text
+lio-connect:v1:<base64-json>
+```
+
+Where the decoded payload contains:
+```json
+{
+  "endpoint": "http://192.168.1.100:8787",
+  "token": "a1b2c3d4e5f6"
+}
+```
+This payload can be copied directly from the collection card in the Web Console and pasted into the extension setup screen.
+
+---
+
+## 9. Verification & Acceptance Criteria
+
+Every production release of Lio must pass the single gate script:
+
+```bash
+./verify.sh
+```
+
+### Acceptance Checklist
+1. **Server Test Suite**: All pytest unit and integration tests pass (`pytest: 127 passed`).
+2. **Plugin Test Suite**: All Node.js test runner unit and property tests pass (`88 passed`).
+3. **Web UI Test Suite**: All UI transform and logic tests pass (`36 passed`).
+4. **Production Builds**: `web-ui` compiles to `lio-server/lio_server/web_dist/` with 0 errors; `lio-plugin` builds Chrome MV3 and Firefox MV2 bundles.
+5. **Real-Browser E2E Harness**: Drives actual Chromium instances via Playwright against a throwaway server, verifying:
+   - Token authentication and gate closure.
+   - Initial merge synchronization without link loss.
+   - Real-time WebSocket push updates across devices.
+   - Cascade deletions and last-write-wins resolution.
+   - In-place title and URL inline editing.
+   - Zero-leak folder scoping and tab session capture.
