@@ -15,7 +15,8 @@ This document defines the formal deployment and operational specification for **
 │   - Tab session boundary tracking          - WebSocket push consumer   │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ HTTP(S) + WSS
-                                    │ Port 8787 (or 8000 via proxy)
+                                    │ Direct: Port 8787 (Debian) or 8000 (Proxmox LXC)
+                                    │ Via Proxy: Port 443 (HTTPS) / 80 (HTTP)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                     REVERSE PROXY / INGRESS LAYER                      │
@@ -24,7 +25,7 @@ This document defines the formal deployment and operational specification for **
 │   - TLS Termination                                                    │
 │   - WebSocket Upgrade (Connection: Upgrade)                            │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP (127.0.0.1 or internal LAN)
+                                    │ HTTP (127.0.0.1:8787 or container:8000)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                          LIO SERVER RUNTIME                            │
