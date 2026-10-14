@@ -98,23 +98,37 @@ export async function flushVisits(): Promise<{ flushed: number }> {
       const gate = await checkGate();
       if (gate.state !== "ok") return { flushed: 0 };
 
-      const increments: VisitIncrement[] = nodeIds.map((nodeId) => ({
-        node_id: nodeId,
-        count: pending[nodeId]!.count,
-        last_visited_at: pending[nodeId]!.last,
-      }));
+      const flushedPairs: Array<{ localId: string; inc: VisitIncrement }> = [];
+      const { getServerId } = await import("./idMap");
+      for (const localId of nodeIds) {
+        const serverId = await getServerId(localId).catch(() => null);
+        if (serverId) {
+          flushedPairs.push({
+            localId,
+            inc: {
+              node_id: serverId,
+              count: pending[localId]!.count,
+              last_visited_at: pending[localId]!.last,
+            },
+          });
+        }
+      }
 
-      await api.pushVisits(increments);
+      if (!flushedPairs.length) return { flushed: 0 };
+
+      const res = await api.pushVisits(flushedPairs.map((p) => p.inc)).catch(() => null);
+      if (!res) return { flushed: 0 };
+
       const after = await readPending();
-      for (const nodeId of nodeIds) {
-        const a = after[nodeId];
+      for (const { localId, inc } of flushedPairs) {
+        const a = after[localId];
         if (a) {
-          a.count -= pending[nodeId]!.count;
-          if (a.count <= 0) delete after[nodeId];
+          a.count -= inc.count;
+          if (a.count <= 0) delete after[localId];
         }
       }
       await writePending(after);
-      return { flushed: increments.length };
+      return { flushed: flushedPairs.length };
     } finally {
       inFlightFlush = null;
     }

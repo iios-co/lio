@@ -39,33 +39,49 @@ function normUrl(u: string | null): string {
  *  folder matches across devices that minted different folder ids. Roots that are
  *  browser-universal ("1"/"2"/"3" -> Bookmarks Bar / Other / Mobile) are named by
  *  their stable label so the path is comparable. */
-const ROOT_NAMES: Record<string, string> = {
+export type RootRoleMap = Record<string, string>;
+
+const ROLE_CANONICAL_NAMES: Record<string, string> = {
   "1": "Bookmarks bar",
   "2": "Other bookmarks",
   "3": "Mobile bookmarks",
+  "menu": "Bookmarks menu",
 };
 
-function buildPaths(nodes: MergeNode[]): Map<string, string> {
+function buildPaths(nodes: MergeNode[], rootRoles?: RootRoleMap): Map<string, string> {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const paths = new Map<string, string>();
+
+  const roleName = (id: string): string | null => {
+    if (rootRoles && id in rootRoles) {
+      const role = rootRoles[id]!;
+      return ROLE_CANONICAL_NAMES[role] ?? role;
+    }
+    if (id in ROLE_CANONICAL_NAMES) {
+      return ROLE_CANONICAL_NAMES[id]!;
+    }
+    return null;
+  };
+
   const pathOf = (id: string, depth: number): string => {
     if (paths.has(id)) return paths.get(id)!;
     if (depth > 64) return "";
     const n = byId.get(id);
     if (!n) return "";
     const parent = n.parentId;
-    let label = n.title?.trim() || ROOT_NAMES[id] || "";
-    if (parent === null || parent === undefined || !byId.has(parent)) {
-      // A universal browser root: name it canonically.
-      label = ROOT_NAMES[id] || label || "";
+    let label = n.title?.trim() || "";
+    const isRoot = parent === null || parent === undefined || parent === "0" || parent === "root________" || !byId.has(parent);
+    if (isRoot) {
+      label = roleName(id) || label || id;
     }
-    const p = parent ? pathOf(parent, depth + 1) : "";
+    const p = parent && parent !== "0" && parent !== "root________" && byId.has(parent) ? pathOf(parent, depth + 1) : "";
     const full = p ? `${p}/${label}` : label;
     paths.set(id, full);
     return full;
   };
+
   for (const n of nodes) {
-    if (n.parentId) pathOf(n.parentId, 0);
+    pathOf(n.id, 0);
   }
   return paths;
 }
@@ -78,23 +94,19 @@ function linkKey(n: MergeNode, folderPaths: Map<string, string>): string {
 }
 
 export interface MergePlan {
-  /** local id -> server id, for links that are the SAME content. The browser id
-   *  wins; the server row is re-keyed to it (converge), not duplicated. */
+  /** local id -> server id, for nodes that are the SAME content. */
   matches: { localId: string; serverId: string }[];
+  /** Explicit folder matches by canonical full path */
+  folderMatches: { localId: string; serverId: string }[];
   /** Local node ids that are genuinely new to the server: unmatched links plus
    *  the folders needed to hold them. Parents appear before children. */
   localOnly: string[];
   /** Server node ids this browser lacks and should pull down: unmatched server
-   *  links plus the folders needed to hold them. A redundant server folder (every
-   *  link inside already matched a local one) is NOT pulled, so the merge does not
-   *  litter the browser with empty duplicate folders. Parents before children. */
+   *  links plus the folders needed to hold them. Parents before children. */
   serverPull: string[];
-  /** Keys present on both sides but AMBIGUOUS (a deliberate duplicate, or a url
-   *  appearing more than once on one side). Reported so the UI can be honest that
-   *  these were left alone rather than merged. */
+  /** Excess items with ambiguous keys left untouched. */
   ambiguousLinks: number;
 }
-
 /**
  * Compute the merge between a fresh browser tree and the server tree.
  *
@@ -103,10 +115,14 @@ export interface MergePlan {
  * server-only children is redundant and is not pulled. Folders that still have
  * unmatched links stay in serverOnly so their links can be created under them.
  */
-export function planMerge(local: MergeNode[], server: MergeNode[]): MergePlan {
-  const localPaths = buildPaths(local);
-  const serverPaths = buildPaths(server);
-
+export function planMerge(
+  local: MergeNode[],
+  server: MergeNode[],
+  localRootRoles?: RootRoleMap,
+  serverRootRoles?: RootRoleMap
+): MergePlan {
+  const localPaths = buildPaths(local, localRootRoles);
+  const serverPaths = buildPaths(server, serverRootRoles ?? { "1": "1", "2": "2", "3": "3", "menu": "menu" });
   const localLinks = local.filter((n) => !n.isFolder && n.url);
   const serverLinks = server.filter((n) => !n.isFolder && n.url);
 
@@ -126,28 +142,63 @@ export function planMerge(local: MergeNode[], server: MergeNode[]): MergePlan {
   }
 
   const matches: { localId: string; serverId: string }[] = [];
+  const folderMatches: { localId: string; serverId: string }[] = [];
   const matchedLocal = new Set<string>();
   const matchedServer = new Set<string>();
   let ambiguousLinks = 0;
 
+  // 1. Explicit folder matching by normalized full path
+  const localFolders = local.filter((n) => n.isFolder);
+  const serverFolders = server.filter((n) => n.isFolder);
+
+  const localFoldersByPath = new Map<string, MergeNode[]>();
+  for (const f of localFolders) {
+    const p = (localPaths.get(f.id) ?? f.title ?? "").toLowerCase();
+    const list = localFoldersByPath.get(p) ?? [];
+    list.push(f);
+    localFoldersByPath.set(p, list);
+  }
+  const serverFoldersByPath = new Map<string, MergeNode[]>();
+  for (const f of serverFolders) {
+    const p = (serverPaths.get(f.id) ?? f.title ?? "").toLowerCase();
+    const list = serverFoldersByPath.get(p) ?? [];
+    list.push(f);
+    serverFoldersByPath.set(p, list);
+  }
+
+  for (const [p, locals] of localFoldersByPath) {
+    const servers = serverFoldersByPath.get(p);
+    if (!servers || servers.length === 0) continue;
+    locals.sort((a, b) => a.id.localeCompare(b.id));
+    servers.sort((a, b) => a.id.localeCompare(b.id));
+    const pairCount = Math.min(locals.length, servers.length);
+    for (let i = 0; i < pairCount; i++) {
+      const l = locals[i]!;
+      const s = servers[i]!;
+      const pair = { localId: l.id, serverId: s.id };
+      folderMatches.push(pair);
+      matchedLocal.add(l.id);
+      matchedServer.add(s.id);
+    }
+  }
+
+  // 2. Link matching by content key with multiset pairing
   for (const [k, locals] of localByKey) {
     const servers = serverByKey.get(k);
     if (!servers || servers.length === 0) continue;
-    // Guard: only collapse when the key is UNIQUE on BOTH sides. Anything else is
-    // ambiguous (a deliberate duplicate, or the same url twice on one side) and is
-    // left alone — merging it would lose a link the user wanted twice.
-    if (locals.length !== 1 || servers.length !== 1) {
-      ambiguousLinks += Math.min(locals.length, servers.length);
-      continue;
-    }
-    const l = locals[0]!;
-    const s = servers[0]!;
-    matches.push({ localId: l.id, serverId: s.id });
-    matchedLocal.add(l.id);
-    matchedServer.add(s.id);
-  }
 
-  // Order parents before children so the executor can create top-down.
+    locals.sort((a, b) => a.id.localeCompare(b.id));
+    servers.sort((a, b) => a.id.localeCompare(b.id));
+
+    const pairCount = Math.min(locals.length, servers.length);
+    for (let i = 0; i < pairCount; i++) {
+      const l = locals[i]!;
+      const s = servers[i]!;
+      matches.push({ localId: l.id, serverId: s.id });
+      matchedLocal.add(l.id);
+      matchedServer.add(s.id);
+    }
+  }
   const localById = new Map(local.map((n) => [n.id, n]));
   const serverById = new Map(server.map((n) => [n.id, n]));
   const byDepth = (ids: string[], byId: Map<string, MergeNode>) =>
@@ -168,7 +219,7 @@ export function planMerge(local: MergeNode[], server: MergeNode[]): MergePlan {
     serverById
   );
 
-  return { matches, localOnly, serverPull, ambiguousLinks };
+  return { matches, folderMatches, localOnly, serverPull, ambiguousLinks };
 }
 
 function depthOf(id: string, byId: Map<string, MergeNode>): number {

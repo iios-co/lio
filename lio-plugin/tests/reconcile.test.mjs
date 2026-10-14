@@ -136,3 +136,70 @@ test("regression: a valid token alone can never say Synced on a comparable card"
   assert.notEqual(syncLabel({ ...base, lastOkAt: null, matched: null }), "Synced");
   assert.notEqual(syncLabel({ ...base, lastOkAt: null, matched: false, differences: 3 }), "Synced");
 });
+
+test("localNodes excludes canonical browser roots from comparison", async () => {
+  const store = new Map([
+    ["collectionId", "col_diff_test"],
+    ["syncConfig", { globalEnabled: true, pairs: [{ id: "p1", type: "bookmark", localFolderId: "", localFolderName: "Everything", enabled: true }] }],
+  ]);
+  globalThis.browser = {
+    storage: {
+      local: {
+        async get(keys) {
+          const ks = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          for (const k of ks) if (store.has(k)) out[k] = store.get(k);
+          return out;
+        },
+      },
+    },
+    bookmarks: {
+      async getTree() {
+        return [
+          {
+            id: "0",
+            title: "",
+            children: [
+              {
+                id: "1",
+                title: "Bookmarks bar",
+                children: [
+                  { id: "100", title: "My Bookmark", url: "https://example.com", parentId: "1", index: 0 },
+                ],
+              },
+              { id: "2", title: "Other bookmarks", children: [] },
+            ],
+          },
+        ];
+      },
+    },
+  };
+  const { localNodes } = await import("../src/lib/reconcile.ts");
+  const nodes = await localNodes();
+  // Roots "0", "1", "2" must be completely excluded; only child bookmark "100" remains
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].title, "My Bookmark");
+});
+
+test("serverNodes excludes canonical server roots (0, 1, 2, 3, menu) from comparison", async () => {
+  const { api } = await import("../src/lib/api.ts");
+  const origGetTree = api.getTree;
+  try {
+    api.getTree = async () => ({
+      nodes: [
+        { id: "1", parent_id: "0", position: 0, title: "Bookmarks bar", url: null, is_folder: true },
+        { id: "menu", parent_id: "0", position: 1, title: "Bookmarks Menu", url: null, is_folder: true },
+        { id: "bm_leaf", parent_id: "1", position: 0, title: "Leaf", url: "https://leaf.example", is_folder: false },
+      ],
+      server_timestamp: 1000,
+      server_version: 5,
+    });
+    const { serverNodes } = await import("../src/lib/reconcile.ts");
+    const sNodes = await serverNodes();
+    assert.ok(sNodes);
+    assert.equal(sNodes.length, 1);
+    assert.equal(sNodes[0].id, "bm_leaf");
+  } finally {
+    api.getTree = origGetTree;
+  }
+});

@@ -23,6 +23,7 @@ const SERVER_ROWS = [
 const store = new Map([
   ["endpoint", "http://test.local"],
   ["token", "tok123"],
+  ["collectionId", "col_test_123"],
   ["deviceId", "dev_test"],
   ["syncConfig", { globalEnabled: true, pairs: [{ id: "p1", type: "bookmark", localFolderId: "1", localFolderName: "Bookmarks bar", collectionPath: "", enabled: true }] }],
 ]);
@@ -85,7 +86,9 @@ globalThis.fetch = async (url, init = {}) => {
     });
   }
   if (u.endsWith("/bookmarks/delta") && init.method === "POST") {
-    return new Response(JSON.stringify({ applied: 0, server_version: 2 }), {
+    const body = JSON.parse(init.body || "[]");
+    const count = Array.isArray(body) ? body.length : (body.ops?.length ?? 0);
+    return new Response(JSON.stringify({ applied: count, server_version: 2 }), {
       status: 200, headers: { "Content-Type": "application/json" },
     });
   }

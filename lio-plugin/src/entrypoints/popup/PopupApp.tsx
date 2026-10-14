@@ -185,6 +185,72 @@ export function PopupApp() {
                   Restore browser as baseline
                 </button>
               </div>
+            ) : bannerMode === "bootstrap" ? (
+              <div className="p-2.5 rounded-lg border border-blue/40 bg-blue/10 space-y-2 text-left">
+                <p className="text-[11.5px] font-semibold text-blue leading-tight">
+                  Initial Setup Decision Needed
+                </p>
+                <p className="text-[11px] text-fg-subtle leading-normal">
+                  Your browser ({status.recoveryRequired?.localNodeCount ?? 0} nodes) and server ({status.recoveryRequired?.serverNodeCount ?? 0} nodes) hold different bookmarks. Choose how to synchronize them:
+                </p>
+                <div className="space-y-1.5 pt-1">
+                  <button
+                    onClick={async () => {
+                      const r = await send<{ ok: boolean; error?: string }>({
+                        type: "RESOLVE_BOOTSTRAP",
+                        mode: "merge",
+                      });
+                      if (r?.ok) {
+                        setNotice("Merged browser with server.");
+                        void refresh();
+                      } else {
+                        setNotice(`Merge failed: ${r?.error ?? "Unknown error"}`);
+                      }
+                    }}
+                    className="w-full py-1.5 rounded text-[11px] font-bold uppercase tracking-wider bg-blue text-white hover:opacity-90 transition-opacity text-center shadow-sm"
+                  >
+                    Merge bookmarks
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm("Replace this browser's bookmarks with the server's tree?\n\nLocal bookmarks not on the server will be deleted.")) return;
+                      const r = await send<{ ok: boolean; error?: string }>({
+                        type: "RESOLVE_BOOTSTRAP",
+                        mode: "server",
+                        confirmed: true,
+                      });
+                      if (r?.ok) {
+                        setNotice("Replaced browser bookmarks with server tree.");
+                        void refresh();
+                      } else {
+                        setNotice(`Operation failed: ${r?.error ?? "Unknown error"}`);
+                      }
+                    }}
+                    className="w-full py-1.5 rounded text-[11px] font-bold tracking-wider border border-blue text-blue hover:bg-blue/10 transition-colors text-center"
+                  >
+                    Use server's bookmarks
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm("Replace the server's bookmarks with this browser's tree?\n\nServer bookmarks not in this browser will be superseded.")) return;
+                      const r = await send<{ ok: boolean; error?: string }>({
+                        type: "RESOLVE_BOOTSTRAP",
+                        mode: "browser",
+                        confirmed: true,
+                      });
+                      if (r?.ok) {
+                        setNotice("Restored browser bookmarks to server.");
+                        void refresh();
+                      } else {
+                        setNotice(`Operation failed: ${r?.error ?? "Unknown error"}`);
+                      }
+                    }}
+                    className="w-full py-1.5 rounded text-[11px] font-bold tracking-wider border border-border text-fg-subtle hover:text-fg hover:border-fg-subtle transition-colors text-center"
+                  >
+                    Use this browser's bookmarks
+                  </button>
+                </div>
+              </div>
             ) : (
               <button onClick={toggleGlobal} className="w-full py-2 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-opacity hover:opacity-90"
                 style={{ background: "color-mix(in srgb, var(--red) 12%, transparent)", border: "1px solid var(--red)", color: "var(--red)" }}>

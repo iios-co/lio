@@ -31,6 +31,9 @@ function makeParent(ids, semantics /* "chrome" | "firefox" */) {
         arr.splice(insertAt, 0, id);
         return {};
       },
+      async getChildren(parentId) {
+        return arr.map((id, index) => ({ id, index, parentId }));
+      },
     },
   };
 }
@@ -66,3 +69,23 @@ for (const sem of ["chrome", "firefox"]) {
     assert.deepEqual(p.order(), ["a", "b", "c"]);
   });
 }
+
+test("target index beyond length clamps to sibling count with getChildren", async () => {
+  let landed = 0;
+  const indices = [];
+  const fakeApi = {
+    async getChildren() {
+      return [{}, {}, {}];
+    },
+    async move(_id, { index }) {
+      indices.push(index);
+      landed = index;
+      return {};
+    },
+    async get() {
+      return [{ index: landed, parentId: "p" }];
+    },
+  };
+  await applyMove(fakeApi, { nodeId: "a", parentId: "p", targetIndex: 99 });
+  assert.deepEqual(indices, [3], "Must clamp to 3 with zero corrective move when landed matches effective target");
+});

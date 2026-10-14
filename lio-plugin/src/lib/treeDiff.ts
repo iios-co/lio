@@ -14,8 +14,8 @@
 // and "Synced" may only be claimed when local and server agree 1:1 on every
 // link — url, title AND position. Anything else reports the real difference.
 //
-// Comparison is by node id, which is exact: the server stores the browser's own
-// bookmark ids, so the same id must carry the same url, title, parent and index
+// Comparison is by canonical server id (mapped from local browser id), which is exact:
+// the server and local representations must agree on url, title, parent and index
 // on both sides.
 
 /** One comparable node. `index` is its position among its siblings. */

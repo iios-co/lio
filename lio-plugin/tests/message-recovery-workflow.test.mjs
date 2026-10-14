@@ -20,13 +20,14 @@ let messageHandler = null;
 
 const localTree = new Map([
   ["0", { id: "0", title: "", parentId: undefined, index: 0, children: ["1"] }],
-  ["1", { id: "1", title: "Bookmarks bar", parentId: "0", index: 0, children: [] }],
+  ["1", { id: "1", title: "Bookmarks bar", parentId: "0", index: 0, children: ["f_1"] }],
+  ["f_1", { id: "f_1", title: "Work Folder", parentId: "1", index: 0, children: [] }],
 ]);
 
 for (let i = 1; i <= 838; i++) {
   const id = `bm_${i}`;
-  localTree.get("1").children.push(id);
-  localTree.set(id, { id, title: `Bookmark ${i}`, url: `https://example.com/${i}`, parentId: "1", index: i - 1 });
+  localTree.get("f_1").children.push(id);
+  localTree.set(id, { id, title: `Bookmark ${i}`, url: `https://example.com/${i}`, parentId: "f_1", index: i - 1 });
 }
 
 function toTree(id) {
@@ -102,7 +103,10 @@ let serverVersion = 10;
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   if (u.endsWith("/healthz")) {
-    return new Response("ok", { status: 200 });
+    return new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (u.includes("/info")) {
+    return new Response(JSON.stringify({ id: "col_test_123", name: "Personal", bookmark_count: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
   }
   if (u.endsWith("/bookmarks/sync") && init.method === "POST") {
     return new Response(JSON.stringify({
@@ -173,8 +177,9 @@ test("pure message-driven recovery workflow: TOGGLE_GLOBAL -> rejection -> recov
 
   store.set("endpoint", "http://test.local");
   store.set("token", "tok_test");
+  store.set("collectionId", "col_test_123");
+  store.set("lio_migrated_col_test_123", true);
   store.set("deviceId", "dev_test");
-  store.set("lastPulledTs", 500);
   store.set("lastServerVersion", 10);
   store.set("knownServerIds", ["1"]);
   store.set("syncConfig", {
@@ -201,7 +206,7 @@ test("pure message-driven recovery workflow: TOGGLE_GLOBAL -> rejection -> recov
   assert.equal(rec.reason, "tombstone_rejection");
   assert.equal(rec.skipped, 839);
   assert.equal(rec.localLinkCount, 838);
-  assert.equal(rec.localNodeCount, 839);
+  assert.equal(rec.localNodeCount, 840);
   assert.equal(store.get("syncConfig").globalEnabled, false, "Sync auto-paused to halt loop");
 
   // D. Unconfirmed restore attempt fails

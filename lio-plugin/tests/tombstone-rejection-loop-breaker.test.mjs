@@ -81,6 +81,8 @@ const { pushLocalOnlyNodes } = await import("../src/lib/bookmarks.ts");
 test("server tombstone rejection (applied:0, skipped_stale:838) immediately halts, pauses sync, and never loops", async () => {
   store.set("endpoint", "http://test.local");
   store.set("token", "tok_test");
+  store.set("collectionId", "col_test_123");
+  store.set("lio_migrated_col_test_123", true);
   store.set("deviceId", "dev_test");
   store.set("lastPulledTs", 500);
   store.set("lastServerVersion", 1);
@@ -89,9 +91,7 @@ test("server tombstone rejection (applied:0, skipped_stale:838) immediately halt
     globalEnabled: true,
     pairs: [{ id: "p1", type: "bookmark", localFolderId: "1", localFolderName: "Bookmarks bar", collectionPath: "", enabled: true }],
   });
-
   const res = await pushLocalOnlyNodes();
-
   // 1. Exactly 1 push call made
   assert.equal(pushCalls, 1, "Only 1 push call must be attempted");
 

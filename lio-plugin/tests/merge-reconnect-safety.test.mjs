@@ -102,6 +102,7 @@ test("onboarding merge is strictly additive and never calls removeTree or emits 
   // Simulate stale state from prior collection A
   store.set("endpoint", "http://old.collection");
   store.set("token", "old_token");
+  store.set("collectionId", "col_old");
   store.set("lastPulledTs", 0);
   store.set("lastServerVersion", 0);
   store.set("bootstrapMode", "merge");

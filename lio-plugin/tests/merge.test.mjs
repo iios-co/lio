@@ -68,10 +68,9 @@ test("the 120-vs-100 case: 100 overlap merges, 20 extras push, total 120", () =>
   assert.equal(p.matches.length + p.localOnly.length + p.serverPull.length, 120);
 });
 
-test("a deliberate duplicate is NEVER falsely collapsed", () => {
-  // The user bookmarked alpha.example TWICE in both trees. The content key is
-  // ambiguous on both sides, so none of them may be matched — collapsing them
-  // would lose a link the user wanted twice.
+test("a deliberate duplicate is matched 1-to-1 via multiset pairing without count growth", () => {
+  // The user bookmarked alpha.example TWICE in both trees.
+  // Multiset pairing pairs l1->s1 and l2->s2 deterministically so neither side duplicates.
   const local = [
     link("l1", "1", "Alpha", "https://alpha.example/"),
     link("l2", "1", "Alpha", "https://alpha.example/"),
@@ -81,9 +80,9 @@ test("a deliberate duplicate is NEVER falsely collapsed", () => {
     link("s2", "1", "Alpha", "https://alpha.example/"),
   ];
   const p = planMerge(local, server);
-  assert.equal(p.matches.length, 0, "ambiguous content is not matched");
-  assert.ok(p.ambiguousLinks > 0, "ambiguity is reported, not silently merged");
-  assert.deepEqual(p.localOnly, ["l1", "l2"], "both local copies are kept");
+  assert.equal(p.matches.length, 2, "both duplicate pairs are matched 1-to-1");
+  assert.equal(p.localOnly.length, 0, "no local duplicates are pushed");
+  assert.equal(p.serverPull.length, 0, "no server duplicates are pulled");
 });
 
 test("a trailing slash does not defeat matching", () => {

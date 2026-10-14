@@ -194,6 +194,7 @@ export default defineBackground(() => {
     type?: string; deviceId?: string; pair?: SyncPair; pairId?: string; enabled?: boolean;
     endpoint?: string; token?: string;
     bootstrapMode?: "merge" | "server" | "browser";
+    mode?: "merge" | "server" | "browser";
     historyId?: number; confirmed?: boolean; label?: string;
   }, _s, sendResponse) => {
     void (async () => {
@@ -377,14 +378,17 @@ export default defineBackground(() => {
             let verified = false;
             let error: string | null = null;
             let collectionName: string | null = null;
+            let collectionId: string | null = null;
             try {
               const r = await fetch(
                 `${endpoint}/api/v1/collections/${encodeURIComponent(token)}/info`,
                 { headers: { Authorization: `Bearer ${token}` } }
               );
               if (r.ok) {
+                const info = await r.json();
                 verified = true;
-                collectionName = (await r.json())?.name ?? null;
+                collectionName = info?.name ?? null;
+                collectionId = info?.id ?? null;
               } else if (r.status === 404) {
                 error = "That server does not recognise this token.";
               } else {
@@ -393,14 +397,17 @@ export default defineBackground(() => {
             } catch (e) {
               error = `Can't reach ${endpoint}: ${(e as Error).message}`;
             }
-            if (!verified) {
-              sendResponse({ ok: false, error });
+            if (!verified || !collectionId) {
+              sendResponse({ ok: false, error: error || "Server did not provide a valid collection ID." });
               break;
             }
             const isOnboarding = msg.bootstrapMode === "merge" || msg.bootstrapMode === "server" || msg.bootstrapMode === "browser";
             const mode = isOnboarding ? msg.bootstrapMode : "merge";
             const currentCfg = await getConfig();
-            const isSwitchingCollection = currentCfg.endpoint !== endpoint || currentCfg.token !== token;
+            // Token rotation preserves collectionId: only a different collectionId counts as switching
+            const isSwitchingCollection = currentCfg.collectionId
+              ? currentCfg.collectionId !== collectionId
+              : currentCfg.endpoint !== endpoint || currentCfg.token !== token;
 
             // When onboarding or switching collections, atomically reset watermark,
             // queue, and stale knownServerIds so state from a prior collection or
@@ -411,14 +418,14 @@ export default defineBackground(() => {
               await setConfig({
                 endpoint,
                 token,
+                collectionId,
                 bootstrapMode: mode,
                 lastPulledTs: 0,
                 lastServerVersion: 0,
               });
             } else {
-              await setConfig({ endpoint, token, bootstrapMode: mode });
+              await setConfig({ endpoint, token, collectionId, bootstrapMode: mode });
             }
-
             const syncCfg = await getSyncConfig();
             const { sync: nextSync, provisioned } = ensureOnboardingBookmarkPair(syncCfg, isOnboarding);
             if (provisioned) {
@@ -555,6 +562,59 @@ export default defineBackground(() => {
               const r = await restoreBaselineFromLocal(msg.label || "Restore browser as baseline");
               sendResponse({ ok: true, restored: r.restored, server_version: r.server_version });
             } catch (e) {
+              sendResponse({ ok: false, error: (e as Error).message || String(e) });
+            }
+            break;
+          }
+          case "RESOLVE_BOOTSTRAP": {
+            const mode = msg.mode as "merge" | "server" | "browser";
+            if (mode !== "merge" && mode !== "server" && mode !== "browser") {
+              sendResponse({ ok: false, error: "Invalid bootstrap mode." });
+              break;
+            }
+            const { recoveryRequired } = (await browser.storage.local.get("recoveryRequired")) as {
+              recoveryRequired?: { reason?: string } | null;
+            };
+            const isBootstrapIncident =
+              recoveryRequired?.reason === "bootstrap_needed" ||
+              recoveryRequired?.reason === "empty_server_tree" ||
+              recoveryRequired?.reason === "unstable_server_tree";
+            if (!recoveryRequired || !isBootstrapIncident) {
+              sendResponse({ ok: false, error: "No active bootstrap incident requires resolution." });
+              break;
+            }
+            if ((mode === "server" || mode === "browser") && !msg.confirmed) {
+              sendResponse({ ok: false, error: "Confirmation required for destructive bootstrap mode." });
+              break;
+            }
+            try {
+              await setSyncConfig({ globalEnabled: false });
+              const result = await bootstrap(mode, !!msg.confirmed);
+              const tree = await api.getTree();
+              if (!tree) {
+                throw new Error("Cannot verify bootstrap: server tree could not be read.");
+              }
+              await setWatermark(tree.server_timestamp, tree.server_version || 0);
+
+              const local = await localNodes();
+              const sNodes = await serverNodes();
+              if (!sNodes) {
+                throw new Error("Cannot verify convergence: server tree could not be read.");
+              }
+              const diff = diffTrees(local, sNodes);
+              if (!diff.identical) {
+                throw new Error(`Bootstrap failed to converge: ${diff.differences} differences remain.`);
+              }
+
+              const cfg = await getConfig();
+              const migrationKey = `lio_migrated_${cfg.collectionId || "default"}`;
+              await browser.storage.local.set({ [migrationKey]: true });
+              await browser.storage.local.remove(["recoveryRequired"]);
+              await setConfig({ bootstrapMode: "" });
+              await setSyncConfig({ globalEnabled: true });
+              sendResponse({ ok: true, result });
+            } catch (e) {
+              await setSyncConfig({ globalEnabled: false });
               sendResponse({ ok: false, error: (e as Error).message || String(e) });
             }
             break;

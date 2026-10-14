@@ -3,6 +3,7 @@
 export interface LioConfig {
   endpoint: string;
   token: string;
+  collectionId: string;
   deviceName: string;
   deviceId: string;
   lastPulledTs: number;
@@ -39,6 +40,7 @@ export interface SyncConfig {
 const DEFAULTS: LioConfig = {
   endpoint: "",
   token: "",
+  collectionId: "",
   deviceName: "",
   deviceId: "",
   lastPulledTs: 0,
@@ -46,7 +48,6 @@ const DEFAULTS: LioConfig = {
   clientSeq: 0,
   bootstrapMode: "",
 };
-
 const SYNC_DEFAULTS: SyncConfig = { globalEnabled: true, pairs: [] };
 
 export function ensureOnboardingBookmarkPair(

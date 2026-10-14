@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 const store = new Map([
   ["endpoint", "http://test.local"],
   ["token", "tok123"],
+  ["collectionId", "col_test_123"],
+  ["lio_migrated_col_test_123", true],
   ["deviceId", "dev_test"],
   ["syncConfig", {
     globalEnabled: true,
@@ -89,6 +91,12 @@ globalThis.browser = {
 
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
+  if (u.endsWith("/healthz")) {
+    return new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (u.includes("/info")) {
+    return new Response(JSON.stringify({ id: "col_test_123", name: "Test", bookmark_count: 2 }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (u.endsWith("/bookmarks/sync") && init.method === "POST") {
     // Deliver explicit tombstone delta operations for gone_a, gone_b, gone_c
     return new Response(JSON.stringify({
@@ -122,8 +130,14 @@ globalThis.fetch = async (url, init = {}) => {
 };
 
 const { syncTransaction, pushLocalOnlyNodes } = await import("../src/lib/bookmarks.ts");
-
+const { setMappings, getServerId } = await import("../src/lib/idMap.ts");
 test("explicit server tombstone deltas are applied locally via syncTransaction", async () => {
+  await setMappings([
+    { serverId: "keep", localId: "keep" },
+    { serverId: "gone_a", localId: "gone_a" },
+    { serverId: "gone_b", localId: "gone_b" },
+    { serverId: "gone_c", localId: "gone_c" },
+  ]);
   const applied = await syncTransaction();
   assert.equal(applied, 3, "must apply the 3 delete tombstones");
 
@@ -139,8 +153,11 @@ test("explicit server tombstone deltas are applied locally via syncTransaction",
 test("pushLocalOnlyNodes pushes genuinely uncommitted local creations and never infers deletions", async () => {
   const r = await pushLocalOnlyNodes();
 
-  const sent = pushedOps.filter((o) => o.op === "create").map((o) => o.node_id);
-  assert.deepEqual(sent, ["fresh"], "only the real local creation is pushed");
+  const creates = pushedOps.filter((o) => o.op === "create");
+  assert.equal(creates.length, 1, "only the real local creation is pushed");
+  assert.equal(creates[0].title, "Added locally");
+  assert.equal(creates[0].url, "https://fresh.example/");
+  assert.equal(await getServerId("fresh"), creates[0].node_id, "minted server ID maps to local fresh node");
   assert.ok(nodes.has("fresh"), "fresh remains in the browser");
   assert.ok(nodes.has("keep"), "survivor remains in the browser");
   assert.equal(r.deletedLocally, 0, "pushLocalOnlyNodes never deletes locally");

@@ -88,6 +88,14 @@ globalThis.browser = {
 
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
+  if (u.includes("/info")) {
+    return new Response(JSON.stringify({
+      id: "col_test_123",
+      name: "Adversarial",
+      bookmark_count: 0,
+      folder_count: 1,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (u.endsWith("/bookmarks/tree")) {
     return new Response(JSON.stringify({
       nodes: [
@@ -112,6 +120,7 @@ const { bootstrap, pushLocalOnlyNodes, reconcileFromServer } = await import("../
 test("adversarial 850-node tree: merge never deletes any local bookmark", async () => {
   store.set("endpoint", "http://test.local");
   store.set("token", "tok_test");
+  store.set("collectionId", "col_test_123");
   store.set("deviceId", "dev_1");
   store.set("lastPulledTs", 0);
   store.set("lastServerVersion", 0);

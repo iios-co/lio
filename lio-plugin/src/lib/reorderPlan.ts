@@ -42,14 +42,7 @@ export async function applyMove(
   const parentId = opts.parentId || undefined;
   const doMove = (index: number) => bm.move(nodeId, { parentId, index });
 
-  await doMove(targetIndex < 0 ? 0 : targetIndex);
-
-  const landed = await currentIndex(bm, nodeId);
-  if (landed == null || landed === targetIndex) return;
-
-  // One correction, pushing in the direction of the shortfall.
-  const corrected = targetIndex + (targetIndex - landed);
-  let siblingCount = Math.max(targetIndex, landed) + 1;
+  let siblingCount: number | null = null;
   if (parentId && typeof bm.getChildren === "function") {
     try {
       const kids = await bm.getChildren(parentId);
@@ -58,5 +51,16 @@ export async function applyMove(
       /* fallback to heuristic */
     }
   }
-  await doMove(clampIndex(corrected, siblingCount));
+
+  const firstMoveTarget = targetIndex < 0 ? 0 : targetIndex;
+  const effectiveTarget = siblingCount == null ? firstMoveTarget : clampIndex(firstMoveTarget, siblingCount);
+  await doMove(effectiveTarget);
+
+  const landed = await currentIndex(bm, nodeId);
+  if (landed == null || landed === effectiveTarget) return;
+
+  // One correction, pushing in the direction of the shortfall.
+  const corrected = effectiveTarget + (effectiveTarget - landed);
+  const correctionBound = siblingCount ?? (Math.max(effectiveTarget, landed) + 1);
+  await doMove(clampIndex(corrected, correctionBound));
 }

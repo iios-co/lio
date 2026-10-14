@@ -18,9 +18,23 @@ import { enqueue, enqueueBatch, peek, acknowledge, size as queueSize } from "./q
 import { checkGate, resetGate } from "./gate";
 import { log } from "./log";
 import { pushService } from "./push";
-import { applyMove } from "./reorderPlan";
+import { applyMove, clampIndex } from "./reorderPlan";
 import { planMerge, type MergeNode } from "./merge";
-
+import {
+  getServerId,
+  getLocalId,
+  setMapping,
+  setMappings,
+  removeByServerId,
+  removeByLocalId,
+  clearMappings,
+  replaceMappings,
+  mintServerId,
+  isLocalRoot,
+  canonicalServerRootForLocal,
+  localRootForServer,
+  detectBrowserRoots,
+} from "./idMap";
 let applyingDepth = 0;
 
 export function isApplyingRemote(): boolean {
@@ -170,6 +184,58 @@ async function withApplyGuard<T>(fn: () => Promise<T>): Promise<T> {
     applyingDepth -= 1;
   }
 }
+const _suppressedCreates = new Map<string, number>();
+const _suppressedRemoves = new Map<string, number>();
+const _suppressedChanges = new Map<string, number>();
+const _suppressedMoves = new Map<string, number>();
+const SUPPRESSION_TTL_MS = 60_000;
+
+function cleanupSuppressed(map: Map<string, number>): void {
+  const now = Date.now();
+  for (const [k, exp] of map) {
+    if (now > exp) map.delete(k);
+  }
+}
+
+export function registerSuppressedCreate(localId: string): void {
+  cleanupSuppressed(_suppressedCreates);
+  _suppressedCreates.set(localId, Date.now() + SUPPRESSION_TTL_MS);
+}
+
+export function registerSuppressedRemove(localId: string): void {
+  cleanupSuppressed(_suppressedRemoves);
+  _suppressedRemoves.set(localId, Date.now() + SUPPRESSION_TTL_MS);
+}
+
+export function registerSuppressedChange(localId: string): void {
+  cleanupSuppressed(_suppressedChanges);
+  _suppressedChanges.set(localId, Date.now() + SUPPRESSION_TTL_MS);
+}
+
+export function registerSuppressedMove(localId: string): void {
+  cleanupSuppressed(_suppressedMoves);
+  _suppressedMoves.set(localId, Date.now() + SUPPRESSION_TTL_MS);
+}
+
+export function consumeSuppressedCreate(localId: string): boolean {
+  cleanupSuppressed(_suppressedCreates);
+  return _suppressedCreates.delete(localId);
+}
+
+export function consumeSuppressedRemove(localId: string): boolean {
+  cleanupSuppressed(_suppressedRemoves);
+  return _suppressedRemoves.delete(localId);
+}
+
+export function consumeSuppressedChange(localId: string): boolean {
+  cleanupSuppressed(_suppressedChanges);
+  return _suppressedChanges.delete(localId);
+}
+
+export function consumeSuppressedMove(localId: string): boolean {
+  cleanupSuppressed(_suppressedMoves);
+  return _suppressedMoves.delete(localId);
+}
 
 function now(): number {
   return Date.now();
@@ -229,16 +295,21 @@ async function dispatch(op: SyncOperation): Promise<void> {
  */
 async function pushSiblingOrder(parentIds: (string | null | undefined)[]): Promise<void> {
   const seen = new Set<string>();
-  const candidates: { id: string; parentId: string; index: number }[] = [];
+  const candidates: { serverId: string; serverParentId: string; index: number }[] = [];
   for (const pid of parentIds) {
     if (!pid || seen.has(pid)) continue;
     seen.add(pid);
+    const serverParentId = await getServerId(pid).catch(() => null);
+    if (!serverParentId) continue;
+
     const kids = await browser.bookmarks.getChildren(pid).catch(() => null);
     if (!kids) continue;
     for (let i = 0; i < kids.length; i++) {
       const k = kids[i]!;
       if (!(await inSyncScope(k.id, pid))) continue;
-      candidates.push({ id: k.id, parentId: pid, index: i });
+      const serverId = await getServerId(k.id).catch(() => null);
+      if (!serverId) continue; // Skip unmapped children; their create will establish identity
+      candidates.push({ serverId, serverParentId, index: i });
     }
   }
   if (!candidates.length) return;
@@ -249,10 +320,10 @@ async function pushSiblingOrder(parentIds: (string | null | undefined)[]): Promi
     operationId: crypto.randomUUID(),
     clientId: cfg.deviceId,
     clientSequence: startSeq + idx,
-    itemId: c.id,
+    itemId: c.serverId,
     operation: "move",
     changes: {
-      parentId: c.parentId,
+      parentId: c.serverParentId,
       index: c.index,
     },
     lastServerVersion: cfg.lastServerVersion || 0,
@@ -295,11 +366,18 @@ export async function drainBookmarkEvents(): Promise<void> {
 }
 
 export function onCreated(id: string, node: BNode): void {
+  if (consumeSuppressedCreate(id)) return;
   if (isApplyingRemote()) return;
   enqueueBookmarkEvent(async () => {
     if (!(await inSyncScope(id, node.parentId))) return;
-    const op = await createSyncOp(id, "create", {
-      parentId: node.parentId ?? null,
+    let serverId = await getServerId(id).catch(() => null);
+    if (!serverId) {
+      serverId = mintServerId();
+      await setMapping(serverId, id);
+    }
+    const serverParentId = await getServerId(node.parentId).catch(() => null);
+    const op = await createSyncOp(serverId, "create", {
+      parentId: serverParentId,
       index: node.index ?? 0,
       title: node.title ?? "",
       url: node.url ?? null,
@@ -316,12 +394,15 @@ export function onChanged(
   id: string,
   changeInfo: { title?: string; url?: string }
 ): void {
+  if (consumeSuppressedChange(id)) return;
   if (isApplyingRemote()) return;
   enqueueBookmarkEvent(async () => {
     const existing = await browser.bookmarks.get(id).catch(() => null);
     const parentId = existing && existing[0] ? existing[0].parentId : undefined;
     if (!(await inSyncScope(id, parentId))) return;
-    const op = await createSyncOp(id, "update", {
+    const serverId = await getServerId(id).catch(() => null);
+    if (!serverId) return;
+    const op = await createSyncOp(serverId, "update", {
       title: changeInfo.title,
       url: changeInfo.url ?? null,
       iconBase64: await faviconFor(changeInfo.url),
@@ -335,26 +416,88 @@ export function onMoved(
   id: string,
   moveInfo: { parentId?: string; index?: number; oldParentId?: string; oldIndex?: number }
 ): void {
+  if (consumeSuppressedMove(id)) return;
   if (isApplyingRemote()) return;
   enqueueBookmarkEvent(async () => {
     const inOld = await inSyncScope(id, moveInfo.oldParentId);
     const inNew = await inSyncScope(id, moveInfo.parentId);
     if (!inOld && !inNew) return;
-    const op = await createSyncOp(id, "move", {
-      parentId: moveInfo.parentId ?? null,
-      index: moveInfo.index ?? 0,
-    });
-    await dispatch(op);
-    await pushSiblingOrder([moveInfo.parentId, moveInfo.oldParentId]);
+
+    if (!inOld && inNew) {
+      // Moved outside -> inside sync scope: recursively create canonical server nodes
+      const existing = (await browser.bookmarks.get(id).catch(() => null))?.[0];
+      if (!existing) return;
+
+      const createSubtree = async (node: BNodeLike) => {
+        let serverId = await getServerId(node.id).catch(() => null);
+        if (!serverId) {
+          serverId = mintServerId();
+          await setMapping(serverId, node.id);
+        }
+        const serverParentId = await getServerId(node.parentId).catch(() => null);
+        const op = await createSyncOp(serverId, "create", {
+          parentId: serverParentId,
+          index: node.index ?? 0,
+          title: node.title ?? "",
+          url: node.url ?? null,
+          isFolder: node.url == null,
+          dateAdded: node.dateAdded ?? Date.now(),
+          iconBase64: await faviconFor(node.url),
+        });
+        await dispatch(op);
+
+        if (node.children) {
+          for (const child of node.children) {
+            await createSubtree(child as BNodeLike);
+          }
+        }
+      };
+
+      const subtree = (await browser.bookmarks.getSubTree(id).catch(() => null))?.[0];
+      if (subtree) {
+        await createSubtree(subtree as BNodeLike);
+      } else {
+        await createSubtree(existing as BNodeLike);
+      }
+      await pushSiblingOrder([moveInfo.parentId]);
+      return;
+    }
+
+    if (inOld && !inNew) {
+      // Moved inside -> outside sync scope: emit canonical delete on the server
+      const serverId = await getServerId(id).catch(() => null);
+      if (serverId) {
+        const op = await createSyncOp(serverId, "delete", {});
+        await dispatch(op);
+      }
+      await pushSiblingOrder([moveInfo.oldParentId]);
+      return;
+    }
+
+    // Inside -> Inside: standard move
+    const serverId = await getServerId(id).catch(() => null);
+    const serverParentId = await getServerId(moveInfo.parentId).catch(() => null);
+    if (serverId && serverParentId) {
+      const op = await createSyncOp(serverId, "move", {
+        parentId: serverParentId,
+        index: moveInfo.index ?? 0,
+      });
+      await dispatch(op);
+      await pushSiblingOrder([moveInfo.parentId, moveInfo.oldParentId]);
+    }
   });
 }
 
 export function onRemoved(id: string, removeInfo?: { parentId?: string }): void {
+  if (consumeSuppressedRemove(id)) return;
   if (isApplyingRemote()) return;
   enqueueBookmarkEvent(async () => {
     if (!(await inSyncScope(id, removeInfo?.parentId))) return;
-    const op = await createSyncOp(id, "delete", {});
-    await dispatch(op);
+    const serverId = await getServerId(id).catch(() => null);
+    if (serverId) {
+      const op = await createSyncOp(serverId, "delete", {});
+      await dispatch(op);
+    }
     await pushSiblingOrder([removeInfo?.parentId]);
   });
 }
@@ -371,15 +514,10 @@ export function onRemoved(id: string, removeInfo?: { parentId?: string }): void 
 // server while the user's browser kept every one of them, and the UI reported
 // success.
 //
-// Order is deliberate: delete, then create parents-before-children, then fix
-// titles/urls, then position. Doing moves before creates would place nodes
-// against indices that are about to shift.
-//
-// The browser is the id authority. When the server holds a node the browser does
-// not (e.g. a folder invented by group-by-domain), we create it locally — which
-// mints a NEW browser id — then push that real id up and delete the server's
-// placeholder row, so the two sides converge on ids the browser owns.
-
+// Order is deliberate: stage missing server nodes parents-before-children with
+// rollback safety, delete obsolete local nodes, align titles/urls/positions,
+// and atomically replace mappings. Server IDs are canonical and mapped to local
+// browser IDs via idMap.
 interface ServerNodeRow {
   id: string;
   parent_id: string | null;
@@ -393,208 +531,343 @@ interface ServerNodeRow {
   server_version?: number;
 }
 
-export async function reconcileFromServer(): Promise<{
-  deleted: number; created: number; updated: number; moved: number;
-}> {
-  const cfg = await getConfig();
-  const res = await api.getTree();
-  if (!res) return { deleted: 0, created: 0, updated: 0, moved: 0 };
-  const server = (res.nodes as ServerNodeRow[]) ?? [];
+export interface ReconcileOptions {
+  allowEmptyServerWipe?: boolean;
+  minimumServerVersion?: number;
+  expectedServerNodeCount?: number;
+}
 
-  // Local, in-scope, hidden root container excluded — the same node set that syncs.
+export async function reconcileFromServer(
+  optionsOrAllowEmpty: boolean | ReconcileOptions = false
+): Promise<{ deleted: number; created: number; updated: number; moved: number; aborted?: boolean }> {
+  const opts: ReconcileOptions =
+    typeof optionsOrAllowEmpty === "boolean"
+      ? { allowEmptyServerWipe: optionsOrAllowEmpty }
+      : optionsOrAllowEmpty;
+  const allowEmptyServerWipe = opts.allowEmptyServerWipe ?? false;
+  const minimumServerVersion = opts.minimumServerVersion ?? 0;
+  const expectedServerNodeCount = opts.expectedServerNodeCount;
+  const res1 = await api.getTree();
+  if (!res1) return { deleted: 0, created: 0, updated: 0, moved: 0, aborted: true };
+  const failUnstableTree = async (detail: string, meta: Record<string, unknown>) => {
+    console.warn(`Lio: ${detail}`, meta);
+    await browser.storage.local.set({
+      recoveryRequired: {
+        reason: "unstable_server_tree",
+        detail,
+        timestamp: Date.now(),
+        ...meta,
+      },
+    });
+    await log({
+      kind: "error",
+      title: "Sync paused: Unstable server tree",
+      detail,
+    });
+    await setSyncConfig({ globalEnabled: false });
+    return { deleted: 0, created: 0, updated: 0, moved: 0, aborted: true };
+  };
+
+  if (minimumServerVersion > 0 && (res1.server_version ?? 0) < minimumServerVersion) {
+    return await failUnstableTree("Server tree snapshot version is behind required minimum version", {
+      server_version: res1.server_version,
+      minimumServerVersion,
+    });
+  }
+
+  const { promise: delayPromise, resolve: delayResolve } = Promise.withResolvers<void>();
+  setTimeout(delayResolve, 50);
+  await delayPromise;
+
+  const res2 = await api.getTree();
+  if (!res2) return { deleted: 0, created: 0, updated: 0, moved: 0, aborted: true };
+  if (minimumServerVersion > 0 && (res2.server_version ?? 0) < minimumServerVersion) {
+    return await failUnstableTree("Second server tree snapshot version is behind required minimum version", {
+      server_version: res2.server_version,
+      minimumServerVersion,
+    });
+  }
+
+  const ids1 = (res1.nodes as ServerNodeRow[] ?? []).map((n) => n.id).sort();
+  const ids2 = (res2.nodes as ServerNodeRow[] ?? []).map((n) => n.id).sort();
+  const versionsAgree = (res1.server_version ?? 0) === (res2.server_version ?? 0);
+  const countAgrees = ids1.length === ids2.length;
+  const setsAgree = countAgrees && ids1.every((id, idx) => id === ids2[idx]);
+
+  if (!versionsAgree || !countAgrees || !setsAgree) {
+    return await failUnstableTree("Consecutive server tree snapshots disagree", {
+      v1: res1.server_version,
+      v2: res2.server_version,
+      count1: ids1.length,
+      count2: ids2.length,
+    });
+  }
+
+  const [info, cfg] = await Promise.all([api.info(), getConfig()]);
+  if (!info || !info.id || !cfg.collectionId || info.id !== cfg.collectionId) {
+    return await failUnstableTree("Collection identity mismatch or unavailable during reconcileFromServer", {
+      infoId: info?.id,
+      configuredId: cfg.collectionId,
+    });
+  }
+  if (info.bookmark_count === undefined || info.folder_count === undefined) {
+    return await failUnstableTree("Collection info is missing required count fields during reconcileFromServer", {
+      info,
+    });
+  }
+  const expectedActive = (info.bookmark_count ?? 0) + (info.folder_count ?? 0);
+  const actualNodes = ids2.length;
+  if (actualNodes !== expectedActive) {
+    return await failUnstableTree("Server tree node count disagrees with authoritative collection info count", {
+      actualNodes,
+      expectedActive,
+      bookmarkCount: info.bookmark_count,
+      folderCount: info.folder_count,
+    });
+  }
+  if (expectedServerNodeCount !== undefined) {
+    if (actualNodes !== expectedServerNodeCount) {
+      return await failUnstableTree("Server tree node count disagrees with delta marker expected count", {
+        actualNodes,
+        expectedServerNodeCount,
+      });
+    }
+    if (expectedActive !== expectedServerNodeCount) {
+      return await failUnstableTree("Authoritative info node count disagrees with delta marker expected count", {
+        expectedActive,
+        expectedServerNodeCount,
+      });
+    }
+  }
+  const res = res2;
+  const server = (res.nodes as ServerNodeRow[]) ?? [];
+  // Local, in-scope nodes in the real browser
   const roots = (await browser.bookmarks.getTree()) as BNodeLike[];
   const syncCfg = await getSyncConfig();
-  const inScopeNodes = walkInScope(roots, buildScopeFilter(roots, syncCfg));
-  const local = new Map<string, { parentId: string | null; index: number; title: string; url: string | null; isFolder: boolean }>(
-    inScopeNodes.map((n) => [
-      n.id,
-      { parentId: n.parentId, index: n.index, title: n.title, url: n.url, isFolder: n.isFolder },
-    ])
-  );
-
+  const bootstrapSyncCfg = { ...syncCfg, globalEnabled: true };
+  const inScopeNodes = walkInScope(roots, buildScopeFilter(roots, bootstrapSyncCfg));
   const serverById = new Map(server.map((n) => [n.id, n]));
-  // Roots the browser owns and we must never delete or re-create.
-  const protectedIds = new Set<string>(["0", "1", "2", "3"]);
 
   let deleted = 0, created = 0, updated = 0, moved = 0;
-  const idRemap: { localId: string; serverId: string }[] = [];
+  const mappingsToSave: Array<{ serverId: string; localId: string }> = [];
+  const placed = new Map<string, string>(); // serverId -> localId
+
+  const rootsInfo = await detectBrowserRoots();
+  // Pre-populate placed with canonical root folders
+  placed.set("1", (await localRootForServer("1")) ?? "1");
+  placed.set("2", (await localRootForServer("2")) ?? "2");
+  placed.set("3", (await localRootForServer("3")) ?? "3");
+  const menuLocal = await localRootForServer("menu");
+  if (menuLocal) {
+    placed.set("menu", menuLocal);
+    if (!rootsInfo.menuLocalId) {
+      mappingsToSave.push({ serverId: "menu", localId: menuLocal });
+    }
+  }
+  // Translate scoped sync pairs to canonical server folder IDs
+  const activePairs = bootstrapSyncCfg.pairs.filter((p) => p.type === "bookmark" && p.enabled);
+  const isSyncEverything = activePairs.some((p) => !p.localFolderId);
+  const scopedServerFolders = new Set<string>();
+  if (!isSyncEverything) {
+    for (const p of activePairs) {
+      if (p.localFolderId) {
+        const sid = await getServerId(p.localFolderId).catch(() => null);
+        if (sid) scopedServerFolders.add(sid);
+      }
+    }
+  }
+
+  const inServerScope = (serverId: string): boolean => {
+    if (activePairs.length === 0) return false;
+    if (isSyncEverything) return true;
+    let cur: string | null = serverId;
+    for (let i = 0; i < 64 && cur; i++) {
+      if (scopedServerFolders.has(cur)) return true;
+      cur = serverById.get(cur)?.parent_id ?? null;
+    }
+    return false;
+  };
+
+  const isRoot = (id: string | null | undefined): boolean => !id || rootsInfo.allRootIds.has(id);
+  const nonRootLocalLinks = inScopeNodes.filter((n) => !isRoot(n.id) && !n.isFolder).length;
+  const nonRootServerLinks = server.filter((s) => !s.is_folder && !isRoot(s.id) && inServerScope(s.id)).length;
+
+  // ADVERSARIAL CIRCUIT BREAKER:
+  // If this browser holds bookmarks but the server tree has zero links,
+  // refuse to wipe local bookmarks. Halt fail-closed with zero local and zero server mutations.
+  if (!allowEmptyServerWipe && nonRootLocalLinks > 0 && nonRootServerLinks === 0) {
+    console.warn("Lio: adversarial circuit breaker: refusing to wipe local bookmarks against empty server tree");
+    await browser.storage.local.set({
+      recoveryRequired: {
+        reason: "empty_server_tree",
+        localNodeCount: inScopeNodes.length,
+        localLinkCount: nonRootLocalLinks,
+        serverNodeCount: server.length,
+        timestamp: Date.now(),
+      },
+    });
+    await log({
+      kind: "error",
+      title: "Sync paused: Empty server tree detected",
+      detail: "The server tree contains no bookmarks while this browser holds bookmarks. Wiping halted to prevent data loss.",
+    });
+    await setSyncConfig({ globalEnabled: false });
+    return { deleted: 0, created: 0, updated: 0, moved: 0, aborted: true };
+  }
 
   await withApplyGuard(async () => {
-    // In Git-style synchronization, automatic reconciliation is strictly ADDITIVE:
-    // Server nodes the browser lacks are pulled down; titles, URLs, and positions are aligned.
-    // Local browser nodes missing from the server are NEVER automatically deleted by a resync marker.
-    // Deletions on the browser happen ONLY when an explicit tombstone delete delta is delivered.
-    // Therefore, deleted is always 0.
-    // -- 2. create server nodes the browser lacks, parents first ------------
-    const missing = server.filter((n) => !local.has(n.id) && !protectedIds.has(n.id));
+    // 1. Populate placed with server IDs whose mapped local nodes already exist in the browser
+    const inScopeById = new Map(inScopeNodes.map((n) => [n.id, n]));
+    for (const s of server) {
+      if (placed.has(s.id)) continue;
+      const mappedLocalId = await getLocalId(s.id).catch(() => null);
+      if (mappedLocalId && inScopeById.has(mappedLocalId)) {
+        placed.set(s.id, mappedLocalId);
+        mappingsToSave.push({ serverId: s.id, localId: mappedLocalId });
+      }
+    }
+
+    // 2. Identify missing in-scope server nodes to create
+    const toCreate = server.filter((s) => inServerScope(s.id) && !placed.has(s.id));
     const depthOnServer = (n: ServerNodeRow): number => {
       let d = 0; let cur: string | null = n.parent_id;
       while (cur && d < 64) { cur = serverById.get(cur)?.parent_id ?? null; d += 1; }
       return d;
     };
-    missing.sort((a, b) => depthOnServer(a) - depthOnServer(b));
+    toCreate.sort((a, b) => {
+      const depthDiff = depthOnServer(a) - depthOnServer(b);
+      if (depthDiff !== 0) return depthDiff;
+      if (a.parent_id !== b.parent_id) return (a.parent_id ?? "").localeCompare(b.parent_id ?? "");
+      return (a.position ?? 0) - (b.position ?? 0);
+    });
 
-    // server id -> the real browser id it ended up as
-    const placed = new Map<string, string>();
-    const resolveParent = (serverParent: string | null): string | undefined => {
-      if (!serverParent) return undefined;
-      if (placed.has(serverParent)) return placed.get(serverParent);
-      if (local.has(serverParent) || protectedIds.has(serverParent)) return serverParent;
-      return undefined; // parent unknown locally; let the browser default it
-    };
-
-    const syncCfg = await getSyncConfig();
-    const activePairs = syncCfg.globalEnabled ? syncCfg.pairs.filter((p) => p.type === "bookmark" && p.enabled) : [];
-    
-    // Evaluate if a server node is within the synced pair folders using the SERVER'S hierarchy.
-    const inServerScope = (serverId: string): boolean => {
-      if (activePairs.length === 0) return false;
-      if (activePairs.some((p) => !p.localFolderId || p.localFolderId === "1" || p.localFolderId === "2" || p.localFolderId === "3")) return true;
-      let cur: string | null = serverId;
-      for (let i = 0; i < 64 && cur; i++) {
-        if (activePairs.some(p => p.localFolderId === cur)) return true;
-        cur = serverById.get(cur)?.parent_id ?? null;
+    const stagedLocalIds: string[] = [];
+    try {
+      for (const s of toCreate) {
+        let parentLocalId: string | null = null;
+        if (s.parent_id) {
+          parentLocalId = placed.get(s.parent_id) ?? (await getLocalId(s.parent_id).catch(() => null));
+        }
+        if (!parentLocalId) {
+          throw new Error(`Incomplete hierarchy: cannot resolve parent ${s.parent_id} for server node ${s.id} (${s.title})`);
+        }
+        const curChildren = await browser.bookmarks.getChildren(parentLocalId).catch(() => []);
+        const clampedIndex = clampIndex(s.position ?? 0, Array.isArray(curChildren) ? curChildren.length : 0);
+        const createParams: { parentId: string; title: string; url?: string; index: number } = {
+          parentId: parentLocalId,
+          title: s.title ?? "",
+          index: clampedIndex,
+        };
+        if (!s.is_folder && s.url) {
+          createParams.url = s.url;
+        }
+        const made = await browser.bookmarks.create(createParams);
+        registerSuppressedCreate(made.id);
+        stagedLocalIds.push(made.id);
+        created += 1;
+        placed.set(s.id, made.id);
+        mappingsToSave.push({ serverId: s.id, localId: made.id });
       }
-      return false;
-    };
 
-    for (const n of missing) {
-      if (!inServerScope(n.id)) continue;
-      const parentId = resolveParent(n.parent_id);
-      const madeNode = await browser.bookmarks
-        .create({
-          parentId,
-          title: n.title ?? "",
-          url: n.is_folder ? undefined : n.url ?? undefined,
-          index: n.position,
-        })
-        .catch((e) => {
-           console.warn(`Lio: failed to create ${n.id} (${n.title}):`, e);
-           return null;
-        });
-      if (!madeNode) continue;
-      created += 1;
-      placed.set(n.id, madeNode.id);
-      // The browser minted a different id than the server row: converge on ours.
-      if (madeNode.id !== n.id) idRemap.push({ localId: madeNode.id, serverId: n.id });
-
-      // Yield the event loop every 100 items to prevent Chrome IPC crashes during large bulk creates
-      if (created % 100 === 0) {
-        await new Promise((r) => setTimeout(r, 20));
+      // Assert every in-scope server node was successfully placed locally
+      const inScopeServerNodes = server.filter((s) => inServerScope(s.id));
+      for (const s of inScopeServerNodes) {
+        if (!placed.has(s.id)) {
+          throw new Error(`Incomplete replica: server node ${s.id} (${s.title}) could not be placed locally`);
+        }
       }
+    } catch (err) {
+      // ROLLBACK: remove newly created nodes in reverse creation order, leave existing local tree and mappings untouched
+      for (const id of stagedLocalIds.reverse()) {
+        registerSuppressedRemove(id);
+        await browser.bookmarks.removeTree(id).catch(() => browser.bookmarks.remove(id)).catch(() => {});
+      }
+      throw err;
     }
 
-    // -- 3. titles and urls -------------------------------------------------
-    for (const [id, l] of local) {
-      const s = serverById.get(id);
-      if (!s) continue;
-      const titleDiffers = (l.title ?? "") !== (s.title ?? "");
-      const urlDiffers = !l.isFolder && (l.url ?? "") !== (s.url ?? "") &&
-        (l.url ?? "").replace(/\/+$/, "") !== (s.url ?? "").replace(/\/+$/, "");
-      if (titleDiffers || urlDiffers) {
-        const changes: { title?: string; url?: string } = {};
-        if (titleDiffers) changes.title = s.title ?? "";
-        if (urlDiffers && s.url) changes.url = s.url;
-        const ok = await browser.bookmarks.update(id, changes).catch(() => null);
+    // 3. Remove obsolete local nodes (nodes in scope that are NOT placed on the server)
+    const placedLocalIds = new Set(placed.values());
+    const obsoleteNodes = inScopeNodes.filter((n) => !isRoot(n.id) && !placedLocalIds.has(n.id));
+    const obsoleteIds = new Set(obsoleteNodes.map((n) => n.id));
+
+    // Highest removable obsolete roots (whose parent is a root, or outside inScope, or in placedLocalIds)
+    const topRemovableObsolete = obsoleteNodes.filter(
+      (n) => !n.parentId || isRoot(n.parentId) || placedLocalIds.has(n.parentId) || !obsoleteIds.has(n.parentId)
+    );
+
+    for (const n of obsoleteNodes) {
+      registerSuppressedRemove(n.id);
+    }
+
+    for (const n of topRemovableObsolete) {
+      const ok = await browser.bookmarks
+        .removeTree(n.id)
+        .catch(() => browser.bookmarks.remove(n.id))
+        .then(() => true)
+        .catch(() => false);
+      if (!ok) {
+        throw new Error(`Failed to remove obsolete local bookmark subtree ${n.id} during reconcileFromServer`);
+      }
+    }
+    deleted = obsoleteNodes.length;
+
+    // 4. Align titles, URLs, and positions locally to match server (after obsolete deletion so indices are final)
+    for (const s of server) {
+      const localId = placed.get(s.id) ?? (await getLocalId(s.id).catch(() => null));
+      if (!localId || (await isLocalRoot(localId))) continue;
+
+      const cur = await browser.bookmarks.get(localId).catch(() => null);
+      if (!cur || !cur[0]) continue;
+      const l = cur[0];
+
+      const titleDiff = (l.title ?? "") !== (s.title ?? "");
+      const urlDiff = !s.is_folder && l.url && s.url && l.url.replace(/\/+$/, "") !== s.url.replace(/\/+$/, "");
+      if (titleDiff || urlDiff) {
+        registerSuppressedChange(localId);
+        const ok = await browser.bookmarks.update(localId, {
+          title: s.title ?? "",
+          url: s.is_folder ? undefined : (s.url ?? undefined),
+        }).then(() => true).catch(() => false);
         if (ok) updated += 1;
       }
-    }
 
-    // -- 4. position, per parent, in the server's order ---------------------
-    const groups = new Map<string, ServerNodeRow[]>();
-    for (const n of server) {
-      if (!n.parent_id) continue;
-      const key = placed.get(n.parent_id) ?? n.parent_id;
-      const list = groups.get(key) ?? [];
-      list.push(n);
-      groups.set(key, list);
-    }
-    for (const [parentId, siblings] of groups) {
-      siblings.sort((a, b) => a.position - b.position);
-      for (let i = 0; i < siblings.length; i++) {
-        const target = siblings[i]!;
-        const localId = placed.get(target.id) ?? target.id;
-        const cur = await browser.bookmarks.get(localId).catch(() => null);
-        if (!cur || !cur[0]) continue;
-        if (cur[0].parentId !== parentId || cur[0].index !== i) {
-          const ok = await applyMove(
-            { get: (id) => browser.bookmarks.get(id), move: (id, dest) => browser.bookmarks.move(id, dest) },
-            { nodeId: localId, parentId, targetIndex: i }
-          ).then(() => true).catch(() => false);
-          if (ok) moved += 1;
-        }
+      const targetParentId = s.parent_id ? (placed.get(s.parent_id) ?? (await getLocalId(s.parent_id).catch(() => null))) : null;
+      if (targetParentId && (l.parentId !== targetParentId || l.index !== s.position)) {
+        registerSuppressedMove(localId);
+        const ok = await applyMove(
+          {
+            get: (id) => browser.bookmarks.get(id),
+            move: (id, dest) => browser.bookmarks.move(id, dest),
+            getChildren: (id) => browser.bookmarks.getChildren(id),
+          },
+          { nodeId: localId, parentId: targetParentId, targetIndex: s.position }
+        ).then(() => true).catch(() => false);
+        if (ok) moved += 1;
       }
     }
   });
 
-  // -- 5. converge ids: push the real browser ids, drop server placeholders --
-  if (idRemap.length) {
-    const ts = now();
-    const ops: DeltaOp[] = [];
-    for (const { localId, serverId } of idRemap) {
-      const got = await browser.bookmarks.get(localId).catch(() => null);
-      const n = got?.[0];
-      if (!n) continue;
-      ops.push({
-        op: "create", node_id: n.id, parent_id: n.parentId ?? null, index: n.index ?? 0,
-        title: n.title ?? "", url: n.url ?? null, is_folder: n.url == null,
-        date_added: n.dateAdded ?? ts, timestamp: ts,
-      });
-      ops.push({ op: "delete", node_id: serverId, timestamp: ts });
+  // 5. Persist all updated mappings atomically in one queued write
+  await replaceMappings(mappingsToSave);
 
-      // State the new parent_id for all children under this remapped folder
-      const children = await browser.bookmarks.getChildren(localId).catch(() => null);
-      if (children) {
-        for (let i = 0; i < children.length; i++) {
-          const child = children[i]!;
-          ops.push({
-            op: "move",
-            node_id: child.id,
-            parent_id: localId,
-            index: child.index ?? i,
-            timestamp: ts,
-          });
-        }
-      }
-    }
-    if (ops.length) await api.pushDelta(cfg.deviceId, ops).catch(() => null);
-  }
+  // Update knownServerIds
+  await setKnownServerIds(server.map((s) => s.id));
 
-  // Refresh and record the converged server id set
-  const afterRes = await api.getTree().catch(() => null);
-  if (afterRes) {
-    await setKnownServerIds((afterRes.nodes as { id: string }[]).map((n) => n.id));
-  }
-
+  // CRITICAL INVARIANT: ZERO API calls to pushDelta or syncBookmarks!
   await log({
     kind: "synced",
     title: "Reconciled with the server",
-    detail: `${deleted} removed, ${created} added, ${updated} renamed, ${moved} moved in this browser.`,
+    detail: `${deleted} removed, ${created} added, ${updated} updated, ${moved} moved in this browser (0 sent to server).`,
   });
-  return { deleted, created, updated, moved };
+
+  return { deleted, created, updated, moved, aborted: false };
 }
 
 // ---- Initial bootstrap: a fresh browser joining a populated collection -----
 //
-// The sync model assumes "the browser id IS the server id", which is false on a
-// fresh install: Chrome mints new ids, so the same link exists twice — once under
-// the server's id (from another device) and once under this browser's. A blind
-// push therefore duplicates everything (observed live: server 100 + fresh browser
-// 120 = 220 rows, 100 dupes).
-//
-// The user picks the policy at connection time (see OptionsApp):
-//   "merge"   — union. Server-only links are pulled into the browser, then the
-//               browser tree becomes the single truth pushed back, re-keying the
-//               server onto browser ids so nothing is duplicated and visit history
-//               survives (merge_from). Content-matched, uniqueness-guarded, so a
-//               deliberate duplicate is never collapsed.
-//   "server"  — the server wins: pull its whole tree, drop local-only links
-//               (reconcileFromServer, the destructive resync path).
-//   "browser" — this browser wins: push its whole tree, drop server-only links.
-//
-// Unlike reconcileFromServer, the merge/browser paths never reposition the local
-// tree during a fresh profile — that step crashed Chrome's bookmark IPC on a
-// brand-new profile, and positions are reasserted by normal sync afterwards.
+// Server IDs are canonical and mapped to local browser IDs via idMap.
+// The merge bootstrap matches 1:1 by path and multiset content without duplication;
+// the server bootstrap reconciles local state strictly to match the server.
 const KNOWN_IDS_KEY = "knownServerIds";
 
 async function getKnownServerIds(): Promise<Set<string>> {
@@ -611,30 +884,31 @@ export async function clearKnownServerIds(): Promise<void> {
 }
 
 export async function bootstrap(
-  mode: "merge" | "server" | "browser"
+  mode: "merge" | "server" | "browser",
+  confirmed = false
 ): Promise<{ pulled: number; pushed: number; matched: number; ambiguous: number; removedFromServer: number }> {
   if (mode === "server") {
-    const r = await reconcileFromServer();
+    const r = await reconcileFromServer({ allowEmptyServerWipe: confirmed });
     return { pulled: r.created, pushed: 0, matched: 0, ambiguous: 0, removedFromServer: 0 };
   }
-  return bootstrapBrowserAuthoritative(mode === "merge");
+  if (mode === "browser") {
+    const r = await restoreBaselineFromLocal("Browser-wins initial bootstrap");
+    return { pulled: 0, pushed: r.restored, matched: 0, ambiguous: 0, removedFromServer: 0 };
+  }
+  return bootstrapBrowserAuthoritative();
 }
 
-// Shared executor for "merge" and "browser": the BROWSER tree is authoritative.
-// `pullServerOnly` is true for merge (server-only links join the browser) and
-// false for browser-wins (server-only links are deleted from the server instead).
-async function bootstrapBrowserAuthoritative(pullServerOnly: boolean): Promise<{
+async function bootstrapBrowserAuthoritative(): Promise<{
   pulled: number; pushed: number; matched: number; ambiguous: number; removedFromServer: number;
 }> {
   const cfg = await getConfig();
   const res = await api.getTree();
   const serverRows: ServerNodeRow[] = (res?.nodes as ServerNodeRow[]) ?? [];
-  const protectedIds = new Set<string>(["0", "1", "2", "3"]);
 
-  // In-scope local nodes as MergeNodes (root container excluded, like every walk).
   const roots = (await browser.bookmarks.getTree()) as BNodeLike[];
   const syncCfg = await getSyncConfig();
-  const inScopeNodes = walkInScope(roots, buildScopeFilter(roots, syncCfg));
+  const bootstrapSyncCfg = { ...syncCfg, globalEnabled: true };
+  const inScopeNodes = walkInScope(roots, buildScopeFilter(roots, bootstrapSyncCfg));
   const localMerge: MergeNode[] = inScopeNodes.map((n) => ({
     id: n.id,
     parentId: n.parentId,
@@ -648,39 +922,58 @@ async function bootstrapBrowserAuthoritative(pullServerOnly: boolean): Promise<{
     url: n.url ?? null, isFolder: !!n.is_folder,
   }));
 
-  const plan = planMerge(localMerge, serverMerge);
+  const rootsInfo = await detectBrowserRoots();
+  const localRootRoles: Record<string, string> = {};
+  if (rootsInfo.barLocalId) localRootRoles[rootsInfo.barLocalId] = "1";
+  if (rootsInfo.otherLocalId) localRootRoles[rootsInfo.otherLocalId] = "2";
+  if (rootsInfo.mobileLocalId) localRootRoles[rootsInfo.mobileLocalId] = "3";
+  if (rootsInfo.menuLocalId) localRootRoles[rootsInfo.menuLocalId] = "menu";
+
+  const plan = planMerge(localMerge, serverMerge, localRootRoles);
   const serverById = new Map(serverRows.map((n) => [n.id, n]));
 
-  // ---- Phase A: pull server-only links into the browser (merge only) --------
-  // serverId -> the new local id Chrome minted for it.
-  const placed = new Map<string, string>();
+  // ---- Phase A: pull server-only links into the browser --------
+  const placed = new Map<string, string>(); // serverId -> localId
+  const mappingsToSave: Array<{ serverId: string; localId: string }> = [];
   let pulled = 0;
-  if (pullServerOnly && plan.serverPull.length) {
+
+  // 1. Map existing matches (NO create deltas for matches!)
+  for (const m of plan.matches) {
+    placed.set(m.serverId, m.localId);
+    mappingsToSave.push({ serverId: m.serverId, localId: m.localId });
+  }
+  for (const fm of plan.folderMatches ?? []) {
+    placed.set(fm.serverId, fm.localId);
+    mappingsToSave.push({ serverId: fm.serverId, localId: fm.localId });
+  }
+  // Pre-populate placed with canonical root folders
+  placed.set("1", (await localRootForServer("1")) ?? "1");
+  placed.set("2", (await localRootForServer("2")) ?? "2");
+  placed.set("3", (await localRootForServer("3")) ?? "3");
+  const menuLocal = await localRootForServer("menu");
+  if (menuLocal) placed.set("menu", menuLocal);
+
+  if (plan.serverPull.length) {
     const localIdSet = new Set(localMerge.map((n) => n.id));
-    for (const id of protectedIds) localIdSet.add(id);
-    // A server row whose parent has no local home must be SKIPPED. Passing
-    // `parentId: undefined` to bookmarks.create does NOT mean "top level" —
-    // Chrome silently files the node in "Other bookmarks". That is how a merge
-    // flattened a whole server tree into that folder, and because the flattened
-    // copies then sat at a different folder path they no longer content-matched,
-    // so the NEXT bootstrap pulled everything again: 842 links became thousands.
-    let unresolved = 0;
-    const resolveParent = (serverParent: string | null): string | null => {
+    const resolveParent = async (serverParent: string | null): Promise<string | null> => {
       if (!serverParent) return null;
       if (placed.has(serverParent)) return placed.get(serverParent) ?? null;
+      const mapped = await getLocalId(serverParent).catch(() => null);
+      if (mapped) return mapped;
       if (localIdSet.has(serverParent)) return serverParent;
       return null;
     };
+
     await withApplyGuard(async () => {
       for (const sid of plan.serverPull) {
         const n = serverById.get(sid);
         if (!n) continue;
-        const parentId = resolveParent(n.parent_id);
-        if (!parentId) { unresolved += 1; continue; }
+        const parentId = await resolveParent(n.parent_id);
+        if (!parentId) continue;
         const made = await browser.bookmarks.create({
           parentId,
           title: n.title ?? "",
-          url: n.is_folder ? undefined : n.url ?? undefined,
+          url: n.is_folder ? undefined : (n.url ?? undefined),
           index: n.position,
         }).catch((e) => {
           console.warn(`Lio: bootstrap pull failed for ${sid} (${n.title}):`, e);
@@ -688,87 +981,76 @@ async function bootstrapBrowserAuthoritative(pullServerOnly: boolean): Promise<{
         });
         if (!made) continue;
         placed.set(sid, made.id);
+        mappingsToSave.push({ serverId: sid, localId: made.id });
         localIdSet.add(made.id);
         pulled += 1;
-        if (pulled % 250 === 0) {
-          await log({ kind: "synced", title: `Merging: pulled ${pulled} of ${plan.serverPull.length} from the server…` });
-          await new Promise((r) => setTimeout(r, 10));
-        }
       }
     });
-    if (unresolved > 0) {
-      // Loud on purpose: a skip means the server sent a row whose parent chain
-      // never landed locally. Silently filing it anywhere is what created
-      // thousands of duplicates, so it is reported, not hidden.
-      await log({
-        kind: "info",
-        title: `Merge skipped ${unresolved} server node${unresolved === 1 ? "" : "s"} with no local parent`,
-        detail: "They were NOT filed into Other bookmarks. The next sync places them once their folder exists.",
-      });
-    }
   }
 
-  // ---- Phase B: the browser is now the union — make the server mirror it -----
-  // browserId -> serverId for rows to adopt (inherit visits) rather than re-create.
-  const mergeFrom = new Map<string, string>();
-  for (const m of plan.matches) mergeFrom.set(m.localId, m.serverId);
-  for (const [sid, lid] of placed) mergeFrom.set(lid, sid);
+  // ---- Phase B: push ONLY genuinely local-only items to the server --------
+  const localToCanonical = new Map<string, string>();
+  for (const m of plan.matches) localToCanonical.set(m.localId, m.serverId);
+  for (const fm of plan.folderMatches ?? []) localToCanonical.set(fm.localId, fm.serverId);
+  for (const [sid, lid] of placed) localToCanonical.set(lid, sid);
+  if (rootsInfo.barLocalId) localToCanonical.set(rootsInfo.barLocalId, "1");
+  if (rootsInfo.otherLocalId) localToCanonical.set(rootsInfo.otherLocalId, "2");
+  if (rootsInfo.mobileLocalId) localToCanonical.set(rootsInfo.mobileLocalId, "3");
+  if (rootsInfo.menuLocalId) localToCanonical.set(rootsInfo.menuLocalId, "menu");
+  localToCanonical.set("1", "1");
+  localToCanonical.set("2", "2");
+  localToCanonical.set("3", "3");
 
-  // Re-read the browser so pulled nodes are included, ordered parents-first.
-  const allLocal: { id: string; parentId: string | null; index: number; title: string; url: string | null; isFolder: boolean; depth: number }[] = [];
-  const collectAll = async (nodes: BNodeLike[], depth: number) => {
-    for (const n of nodes) {
-      const isRootContainer = !n.parentId && !(n.title ?? "").trim();
-      if (!isRootContainer && n.id && (await inSyncScope(n.id, n.parentId))) {
-        allLocal.push({
-          id: n.id, parentId: n.parentId ?? null, index: n.index ?? 0,
-          title: n.title ?? "", url: n.url ?? null, isFolder: n.url == null, depth,
-        });
-      }
-      if (n.children) await collectAll(n.children as BNodeLike[], depth + 1);
-    }
-  };
-  await collectAll((await browser.bookmarks.getTree()) as BNodeLike[], 0);
-  allLocal.sort((a, b) => a.depth - b.depth);
-
+  const ops: DeltaOp[] = [];
   const ts = now();
-  const ops: DeltaOp[] = allLocal.map((n) => ({
-    op: "create",
-    node_id: n.id,
-    parent_id: n.parentId,
-    index: n.index,
-    title: n.title,
-    url: n.url,
-    is_folder: n.isFolder,
-    date_added: ts,
-    timestamp: ts,
-    merge_from: mergeFrom.get(n.id) ?? null,
-  }));
+  const localNodeMap = new Map(inScopeNodes.map((n) => [n.id, n]));
+  const localMergeMap = new Map(localMerge.map((n) => [n.id, n]));
 
-  // In "merge" mode, a merge is strictly additive (union): NEVER emit deletes
-  // to the server. Deletions on the server are only allowed in "browser" (browser-wins)
-  // mode where pullServerOnly is false.
-  const toDelete: string[] = [];
-  if (!pullServerOnly) {
-    const browserIds = new Set(allLocal.map((n) => n.id));
-    const adopted = new Set(mergeFrom.values());
-    const depthOnServer = (id: string): number => {
-      let d = 0; let cur: string | null = serverById.get(id)?.parent_id ?? null;
-      while (cur && serverById.has(cur) && d < 64) { d += 1; cur = serverById.get(cur)?.parent_id ?? null; }
-      return d;
-    };
-    const serverDroppable = serverRows
-      .map((n) => n.id)
-      .filter((id) => !adopted.has(id) && !browserIds.has(id) && !protectedIds.has(id))
-      .sort((a, b) => depthOnServer(b) - depthOnServer(a));
-    for (const id of serverDroppable) {
-      toDelete.push(id);
-      ops.push({ op: "delete", node_id: id, timestamp: ts });
+  for (const lid of plan.localOnly) {
+    const n = localMergeMap.get(lid);
+    if (!n) continue;
+    let serverId = localToCanonical.get(n.id) ?? (await getServerId(n.id).catch(() => null));
+    if (!serverId) {
+      serverId = mintServerId();
+      localToCanonical.set(n.id, serverId);
+      mappingsToSave.push({ serverId, localId: n.id });
+    }
+
+    let serverParentId: string | null = null;
+    if (n.parentId) {
+      serverParentId = localToCanonical.get(n.parentId) ?? (await getServerId(n.parentId).catch(() => null));
+      if (!serverParentId) {
+        throw new Error(`Unresolvable parent ${n.parentId} for local bookmark ${n.id} (${n.title})`);
+      }
+    }
+
+    const realIndex = localNodeMap.get(n.id)?.index ?? 0;
+    ops.push({
+      op: "create",
+      node_id: serverId,
+      parent_id: serverParentId,
+      index: realIndex,
+      title: n.title,
+      url: n.url,
+      is_folder: n.isFolder,
+      date_added: ts,
+      timestamp: ts,
+    });
+  }
+
+  if (ops.length) {
+    const pushRes = await api.pushDelta(cfg.deviceId, ops);
+    if (!pushRes || pushRes.applied !== ops.length || (pushRes.skipped_stale ?? 0) > 0) {
+      throw new Error(`Merge push rejected or incomplete: applied ${pushRes?.applied ?? 0} of ${ops.length}, skipped_stale ${pushRes?.skipped_stale ?? 0}`);
     }
   }
-  if (ops.length) await api.pushDelta(cfg.deviceId, ops).catch(() => null);
 
-  // Record the converged server id set so the repair step trusts it next cycle.
+  // Persist all ID mappings
+  if (mappingsToSave.length) {
+    await setMappings(mappingsToSave);
+  }
+
+  // Record the converged server id set
   const afterRes = await api.getTree().catch(() => null);
   if (afterRes) {
     await setKnownServerIds((afterRes.nodes as { id: string }[]).map((n) => n.id));
@@ -776,16 +1058,16 @@ async function bootstrapBrowserAuthoritative(pullServerOnly: boolean): Promise<{
 
   await log({
     kind: "synced",
-    title: `Merged with the server: ${plan.matches.length} matched, ${pulled} pulled in, ${ops.length - toDelete.length} pushed, ${toDelete.length} removed from the server.` +
+    title: `Merged with the server: ${plan.matches.length} matched, ${pulled} pulled in, ${ops.length} pushed, 0 removed from the server.` +
       (plan.ambiguousLinks ? ` ${plan.ambiguousLinks} duplicate-url link(s) were left as-is, not merged.` : ""),
   });
 
   return {
     pulled,
-    pushed: ops.length - toDelete.length,
+    pushed: ops.length,
     matched: plan.matches.length,
     ambiguous: plan.ambiguousLinks,
-    removedFromServer: toDelete.length,
+    removedFromServer: 0,
   };
 }
 export async function restoreBaselineFromLocal(label = "Restore browser as baseline"): Promise<{
@@ -806,19 +1088,55 @@ export async function restoreBaselineFromLocal(label = "Restore browser as basel
   await setSyncConfig({ globalEnabled: false });
 
   const treeRes = await api.getTree();
-  const initialNodes = (treeRes?.nodes ?? []) as ServerNodeRow[];
+  if (!treeRes) {
+    throw new Error("Cannot restore baseline: server tree could not be read.");
+  }
+  const initialNodes = (treeRes.nodes ?? []) as ServerNodeRow[];
   const expectedActive = initialNodes.length;
-  const expectedVersion = treeRes?.server_version ?? 0;
+  const expectedVersion = treeRes.server_version ?? 0;
 
-  const nodesPayload = inScope.map((n) => ({
-    id: n.id,
-    parent_id: n.parentId,
-    position: n.index,
-    title: n.title,
-    url: n.url,
-    is_folder: n.isFolder,
-    date_added: n.dateAdded,
-  }));
+  const rootsInfo = await detectBrowserRoots();
+  const isRoot = (id: string | null | undefined): boolean => !id || rootsInfo.allRootIds.has(id);
+
+  const localToCanonical = new Map<string, string>();
+  if (rootsInfo.barLocalId) localToCanonical.set(rootsInfo.barLocalId, "1");
+  if (rootsInfo.otherLocalId) localToCanonical.set(rootsInfo.otherLocalId, "2");
+  if (rootsInfo.mobileLocalId) localToCanonical.set(rootsInfo.mobileLocalId, "3");
+  if (rootsInfo.menuLocalId) localToCanonical.set(rootsInfo.menuLocalId, "menu");
+  localToCanonical.set("1", "1");
+  localToCanonical.set("2", "2");
+  localToCanonical.set("3", "3");
+
+  const nonRootInScope = inScope.filter((n) => !isRoot(n.id));
+  const parentOf = new Map(inScope.map((n) => [n.id, n.parentId]));
+  const depthOf = (id: string): number => {
+    let d = 0; let cur = parentOf.get(id);
+    while (cur && parentOf.has(cur) && d < 64) { d += 1; cur = parentOf.get(cur); }
+    return d;
+  };
+  nonRootInScope.sort((a, b) => depthOf(a.id) - depthOf(b.id));
+
+  for (const n of nonRootInScope) {
+    const canonicalId = mintServerId();
+    localToCanonical.set(n.id, canonicalId);
+  }
+
+  const nodesPayload = nonRootInScope.map((n) => {
+    const canonicalId = localToCanonical.get(n.id)!;
+    const canonicalParentId = n.parentId ? localToCanonical.get(n.parentId) : null;
+    if (!canonicalParentId) {
+      throw new Error(`Unresolvable parent ${n.parentId} for local bookmark ${n.id} (${n.title}) during baseline restore`);
+    }
+    return {
+      id: canonicalId,
+      parent_id: canonicalParentId,
+      position: n.index,
+      title: n.title,
+      url: n.url,
+      is_folder: n.isFolder,
+      date_added: n.dateAdded,
+    };
+  });
 
   const res = await api.restoreBaseline({
     label,
@@ -831,34 +1149,37 @@ export async function restoreBaselineFromLocal(label = "Restore browser as basel
     throw new Error(`Server failed to restore expected node count: submitted ${nodesPayload.length}, restored ${res?.restored}`);
   }
 
-  // Exact verification: Verify that EVERY submitted node exists on the server with matching attributes,
-  // and that any unrelated pre-existing active server nodes were preserved.
   const verifiedTree = await api.getTree();
   const verifiedNodes = (verifiedTree?.nodes ?? []) as ServerNodeRow[];
   const verifiedById = new Map(verifiedNodes.map((n) => [n.id, n]));
 
-  for (const local of inScope) {
-    const s = verifiedById.get(local.id);
+  if (verifiedNodes.length !== nodesPayload.length) {
+    throw new Error(`Baseline verification failed: expected exactly ${nodesPayload.length} active nodes on server, got ${verifiedNodes.length}`);
+  }
+
+  for (const p of nodesPayload) {
+    const s = verifiedById.get(p.id);
     if (!s) {
-      throw new Error(`Baseline verification failed: submitted node ${local.id} (${local.title}) missing on server.`);
+      throw new Error(`Baseline verification failed: submitted node ${p.id} (${p.title}) missing on server.`);
     }
     if (
-      s.title !== local.title ||
-      (s.url ?? null) !== (local.url ?? null) ||
-      Boolean(s.is_folder) !== Boolean(local.isFolder) ||
-      (s.parent_id ?? null) !== (local.parentId ?? null) ||
-      s.position !== local.index
+      s.title !== p.title ||
+      (s.url ?? null) !== (p.url ?? null) ||
+      Boolean(s.is_folder) !== Boolean(p.is_folder) ||
+      (s.parent_id ?? null) !== (p.parent_id ?? null) ||
+      s.position !== p.position
     ) {
-      throw new Error(`Baseline verification mismatch for node ${local.id}: attributes differ.`);
+      throw new Error(`Baseline verification mismatch for node ${p.id}: attributes differ.`);
     }
   }
-  // Verify unrelated pre-existing active nodes remain active
-  const submittedIdSet = new Set(nodesPayload.map((n) => n.id));
-  for (const initial of initialNodes) {
-    if (!submittedIdSet.has(initial.id) && !verifiedById.has(initial.id)) {
-      throw new Error(`Baseline verification failed: pre-existing active node ${initial.id} was accidentally lost.`);
-    }
-  }
+
+  // Reset ID mappings for this collection so each local node maps to its canonical baseline server ID
+  await clearMappings();
+  const baselineMappings = nonRootInScope.map((n) => ({
+    serverId: localToCanonical.get(n.id)!,
+    localId: n.id,
+  }));
+  await setMappings(baselineMappings);
 
   await setWatermark(res.server_timestamp, res.server_version);
   await setKnownServerIds(verifiedNodes.map((n) => n.id));
@@ -938,8 +1259,104 @@ export async function pushLocalOnlyNodes(): Promise<{
   // explicit tombstone deltas (op: 'delete') received in syncTransaction / applyRemoteChange,
   // or an explicit user-initiated 'resync' (reconcileFromServer).
   // Therefore, pushLocalOnlyNodes NEVER infers or applies local deletions from set differences.
+  const rootsInfo = await detectBrowserRoots();
+  const isRoot = (id: string | null | undefined): boolean => !id || rootsInfo.allRootIds.has(id);
+
+  // One-time upgrade migration check for profiles without mappings:
+  const migrationKey = `lio_migrated_${cfg.collectionId || "default"}`;
+  const { [migrationKey]: alreadyMigrated } = await browser.storage.local.get(migrationKey);
+
+  if (!alreadyMigrated && server.length > 0) {
+    const nonRootLocal = inScopeNodes.filter((n) => !isRoot(n.id));
+    const nonRootServer = server.filter((s) => s.id !== "1" && s.id !== "2" && s.id !== "3" && s.id !== "menu");
+
+    if (nonRootLocal.length === 0 && nonRootServer.length === 0) {
+      await browser.storage.local.set({ [migrationKey]: true });
+    } else {
+      const localToCanonical = new Map<string, string>();
+      const canonicalToLocal = new Map<string, string>();
+      const newMappingsToSave: Array<{ serverId: string; localId: string }> = [];
+
+      // Seed with existing valid mappings
+      for (const n of nonRootLocal) {
+        const sid = await getServerId(n.id).catch(() => null);
+        if (sid && serverById.has(sid)) {
+          localToCanonical.set(n.id, sid);
+          canonicalToLocal.set(sid, n.id);
+        }
+      }
+
+      // Run planMerge to discover remaining matching folders and links
+      const localMerge: MergeNode[] = inScopeNodes.map((n) => ({
+        id: n.id,
+        parentId: n.parentId,
+        title: n.title,
+        url: n.url,
+        isFolder: n.isFolder,
+      }));
+      const serverMerge: MergeNode[] = server.map((n) => ({
+        id: n.id,
+        parentId: n.parent_id,
+        title: n.title ?? "",
+        url: n.url ?? null,
+        isFolder: !!n.is_folder,
+      }));
+      const localRootRoles: Record<string, string> = {};
+      if (rootsInfo.barLocalId) localRootRoles[rootsInfo.barLocalId] = "1";
+      if (rootsInfo.otherLocalId) localRootRoles[rootsInfo.otherLocalId] = "2";
+      if (rootsInfo.mobileLocalId) localRootRoles[rootsInfo.mobileLocalId] = "3";
+      if (rootsInfo.menuLocalId) localRootRoles[rootsInfo.menuLocalId] = "menu";
+
+      const plan = planMerge(localMerge, serverMerge, localRootRoles);
+
+      for (const fm of plan.folderMatches ?? []) {
+        if (!localToCanonical.has(fm.localId) && !canonicalToLocal.has(fm.serverId)) {
+          localToCanonical.set(fm.localId, fm.serverId);
+          canonicalToLocal.set(fm.serverId, fm.localId);
+          newMappingsToSave.push({ serverId: fm.serverId, localId: fm.localId });
+        }
+      }
+      for (const m of plan.matches) {
+        if (!localToCanonical.has(m.localId) && !canonicalToLocal.has(m.serverId)) {
+          localToCanonical.set(m.localId, m.serverId);
+          canonicalToLocal.set(m.serverId, m.localId);
+          newMappingsToSave.push({ serverId: m.serverId, localId: m.localId });
+        }
+      }
+
+      const allLocalCovered = nonRootLocal.every((n) => localToCanonical.has(n.id));
+      const allServerCovered = nonRootServer.every((s) => canonicalToLocal.has(s.id));
+
+      if (allLocalCovered && allServerCovered) {
+        if (newMappingsToSave.length) {
+          await setMappings(newMappingsToSave);
+        }
+        await browser.storage.local.set({ [migrationKey]: true });
+      } else {
+        // Tree divergence: do NOT set migrationKey! Pause sync and request decision.
+        await browser.storage.local.set({
+          recoveryRequired: {
+            reason: "bootstrap_needed",
+            localNodeCount: inScopeNodes.length,
+            serverNodeCount: server.length,
+            timestamp: Date.now(),
+          },
+        });
+        await log({
+          kind: "error",
+          title: "Sync paused: Initial setup decision needed",
+          detail: "Your browser bookmarks and server bookmarks differ. Choose Merge, Use Server, or Use Browser to sync.",
+        });
+        await setSyncConfig({ globalEnabled: false });
+        return { pushed: 0, deletedLocally: 0, unresolved: nonRootLocal.length };
+      }
+    }
+  }
+
   for (const n of inScopeNodes) {
-    const s = serverById.get(n.id);
+    if (isRoot(n.id)) continue;
+    const serverId = await getServerId(n.id).catch(() => null);
+    const s = serverId ? serverById.get(serverId) : undefined;
     if (!s) {
       localOnly.push({
         id: n.id,
@@ -948,40 +1365,36 @@ export async function pushLocalOnlyNodes(): Promise<{
         title: n.title,
         url: n.url,
         dateAdded: n.dateAdded,
-        depth: 0,
+        depth: depthOfLocal(n.id),
       });
     } else {
-      // Node is on both sides but sits somewhere different. WHO WINS is decided
-      // by whether this browser has actually SEEN the server's current row.
-      //
-      // `s.server_version` is the watermark of the row's last accepted server
-      // mutation; `cfg.lastServerVersion` is the last watermark this browser
-      // consumed. If the row moved after that, the change happened while this
-      // browser was not listening (paused, asleep, offline) — the server is
-      // authoritative, so the move is applied HERE.
-      //
-      // Previously this branch unconditionally declared "the browser is the
-      // position authority" and pushed a move up, so reorganising on the server
-      // while paused was undone the moment sync resumed.
       const localParent = n.parentId ?? null;
       const serverParent = s.parent_id ?? null;
-      const parentDiffers = localParent !== serverParent;
+      const mappedLocalParent = localParent ? (await getServerId(localParent).catch(() => null)) : null;
+      const parentDiffers = (mappedLocalParent ?? localParent) !== serverParent;
       const positionDiffers = n.index !== s.position;
       if (parentDiffers || positionDiffers) {
         const rowVersion = s.server_version ?? 0;
         const seenVersion = cfg.lastServerVersion || 0;
         if (rowVersion > seenVersion) {
+          const targetLocalParent = serverParent ? (await getLocalId(serverParent).catch(() => null)) : null;
+          if (serverParent && !targetLocalParent) {
+            throw new Error(`Cannot apply server placement for ${n.id}: server parent ${serverParent} not resolved locally`);
+          }
           serverMoves.push({
             id: n.id,
-            parentId: serverParent,
+            parentId: targetLocalParent,
             index: s.position,
             depth: depthOfLocal(n.id),
           });
         } else {
+          if (!serverId) {
+            throw new Error(`Cannot realign node ${n.id}: missing canonical serverId`);
+          }
           realignMoves.push({
             op: "move",
-            node_id: n.id,
-            parent_id: localParent,
+            node_id: serverId,
+            parent_id: serverParent,
             index: n.index,
             timestamp: ts,
           });
@@ -989,7 +1402,6 @@ export async function pushLocalOnlyNodes(): Promise<{
       }
     }
   }
-
   // Apply server-authored placements locally, shallowest-first so a parent is in
   // place before its children are positioned into it. Under the apply guard, so
   // these moves are not observed as local edits and pushed straight back up.
@@ -1027,18 +1439,35 @@ export async function pushLocalOnlyNodes(): Promise<{
   const serverDeletes: DeltaOp[] = [];
 
   localOnly.sort((a, b) => a.depth - b.depth); // parents before children
-  const createOps: DeltaOp[] = localOnly.map((m) => ({
-    op: "create",
-    node_id: m.id,
-    parent_id: m.parentId,
-    index: m.index,
-    title: m.title,
-    url: m.url,
-    is_folder: m.url == null,
-    date_added: m.dateAdded ?? ts,
-    timestamp: ts,
-  }));
+  const localToCanonical = new Map<string, string>();
+  const mappingsToSave: Array<{ serverId: string; localId: string }> = [];
+  const createOps: DeltaOp[] = [];
 
+  for (const m of localOnly) {
+    let serverId = localToCanonical.get(m.id) ?? (await getServerId(m.id).catch(() => null));
+    if (!serverId) {
+      serverId = mintServerId();
+      localToCanonical.set(m.id, serverId);
+      mappingsToSave.push({ serverId, localId: m.id });
+    }
+    const serverParentId = m.parentId
+      ? (localToCanonical.get(m.parentId) ?? (await getServerId(m.parentId).catch(() => null)))
+      : null;
+    if (m.parentId && !serverParentId) {
+      throw new Error(`Unresolvable parent ${m.parentId} for local bookmark ${m.id} (${m.title})`);
+    }
+    createOps.push({
+      op: "create",
+      node_id: serverId,
+      parent_id: serverParentId,
+      index: m.index,
+      title: m.title,
+      url: m.url,
+      is_folder: m.url == null,
+      date_added: m.dateAdded ?? ts,
+      timestamp: ts,
+    });
+  }
   const ops = [...createOps, ...realignMoves, ...serverDeletes];
   let pushed = 0;
   if (ops.length > 0) {
@@ -1049,10 +1478,6 @@ export async function pushLocalOnlyNodes(): Promise<{
     const applied = res.applied ?? 0;
     const skipped = res.skipped_stale ?? 0;
 
-    // REJECTION-AWARE CIRCUIT BREAKER:
-    // If the server rejected operations due to tombstones or staleness, we must NEVER
-    // falsely claim success, must NOT mark rejected nodes as known, and must halt the
-    // repair cycle to prevent infinite ping-pong retry loops.
     if (skipped > 0 || applied < ops.length) {
       console.warn(`Lio: server rejected ${skipped} of ${ops.length} ops (${applied} applied). Halting repair cycle.`);
       const localLinks = inScopeNodes.filter((n) => !n.isFolder).length;
@@ -1072,9 +1497,12 @@ export async function pushLocalOnlyNodes(): Promise<{
         title: `Sync paused: Server rejected ${skipped} bookmark changes`,
         detail: `The server holds tombstones or conflicting state for ${skipped} items. Paused to prevent a sync loop.`,
       });
-      // Pause sync to break any automated retry loop
       await setSyncConfig({ globalEnabled: false });
       return { pushed: 0, deletedLocally: 0, unresolved: skipped };
+    }
+
+    if (mappingsToSave.length) {
+      await setMappings(mappingsToSave);
     }
 
     pushed = localOnly.length;
@@ -1098,7 +1526,7 @@ export async function pushLocalOnlyNodes(): Promise<{
 
   const updatedKnown = new Set(serverIds);
   for (const op of serverDeletes) updatedKnown.delete(op.node_id);
-  for (const n of localOnly) updatedKnown.add(n.id);
+  for (const op of createOps) updatedKnown.add(op.node_id);
   await setKnownServerIds([...updatedKnown]);
   return { pushed, deletedLocally: 0, unresolved: 0 };
 }
@@ -1107,11 +1535,14 @@ async function applyRemoteChange(change: DeltaChange): Promise<void> {
   const { operation, itemId, data } = change;
   const parentId = data?.parentId;
 
-  const existing = await browser.bookmarks.get(itemId).catch(() => null);
+  // Translate canonical server ID to local ID:
+  const localId = await getLocalId(itemId);
+  const localParentId = parentId ? await getLocalId(parentId) : null;
+  const existing = localId ? await browser.bookmarks.get(localId).catch(() => null) : null;
   const cur = existing && existing.length ? existing[0]! : undefined;
 
-  const inScopeRemote = await inSyncScope(itemId, parentId);
-  const inScopeLocal = cur ? await inSyncScope(itemId, cur.parentId) : false;
+  const inScopeRemote = localParentId ? await inSyncScope(localId || itemId, localParentId) : false;
+  const inScopeLocal = cur ? await inSyncScope(cur.id, cur.parentId) : false;
 
   if (!inScopeRemote && !inScopeLocal) {
     return;
@@ -1119,49 +1550,67 @@ async function applyRemoteChange(change: DeltaChange): Promise<void> {
 
   await withApplyGuard(async () => {
     if (operation === "delete") {
-      try {
-        await browser.bookmarks
-          .removeTree(itemId)
-          .catch(() => browser.bookmarks.remove(itemId));
-      } catch {
-        /* already gone */
+      if (localId) {
+        const localExists = await browser.bookmarks.get(localId).catch(() => null);
+        if (localExists && localExists.length) {
+          registerSuppressedRemove(localId);
+          const ok = await browser.bookmarks
+            .removeTree(localId)
+            .catch(() => browser.bookmarks.remove(localId))
+            .then(() => true)
+            .catch(() => false);
+          if (!ok) {
+            throw new Error(`Failed to remove local bookmark ${localId} for remote delete ${itemId}`);
+          }
+        }
+        await removeByServerId(itemId);
       }
       return;
     }
     if (operation === "create" && !cur) {
       if (!inScopeRemote) return;
-      // Same trap as the bootstrap pull: `parentId: undefined` is NOT "top
-      // level" — Chrome files the node under "Other bookmarks". A create whose
-      // parent hasn't landed locally yet must be skipped; the repair pass
-      // (pushLocalOnlyNodes) or the next full pull places it once the parent
-      // exists, instead of stranding a copy in the wrong folder.
-      if (!parentId) return;
-      const parentExists = await browser.bookmarks.get(parentId).catch(() => null);
-      if (!parentExists || !parentExists.length) return;
-      await browser.bookmarks.create({
-        parentId,
+      if (!parentId) throw new Error(`Cannot apply remote create for ${itemId}: missing parentId`);
+      if (!localParentId) {
+        throw new Error(`Cannot apply remote create for ${itemId}: parent ${parentId} not resolved locally`);
+      }
+      const parentExists = await browser.bookmarks.get(localParentId).catch(() => null);
+      if (!parentExists || !parentExists.length) {
+        throw new Error(`Cannot apply remote create for ${itemId}: local parent ${localParentId} does not exist in browser`);
+      }
+      const made = await browser.bookmarks.create({
+        parentId: localParentId,
         title: data.title || "",
         url: data.url || undefined,
         index: data.position,
       });
+      if (made) {
+        registerSuppressedCreate(made.id);
+        await setMapping(itemId, made.id);
+      }
       return;
     }
-    if (cur) {
+    if (cur && localId) {
       if (operation === "update") {
-        await browser.bookmarks.update(itemId, {
+        registerSuppressedChange(localId);
+        await browser.bookmarks.update(localId, {
           title: data.title ?? cur.title,
           url: data.url ?? cur.url,
         });
       } else if (operation === "move") {
         if (!inScopeRemote) return;
+        if (data.parentId && !localParentId) {
+          throw new Error(`Cannot apply remote move for ${itemId}: parent ${data.parentId} not resolved locally`);
+        }
+        registerSuppressedMove(localId);
         await applyMove(
           {
             get: (id) => browser.bookmarks.get(id),
             move: (id, dest) => browser.bookmarks.move(id, dest),
+            getChildren: (id) => browser.bookmarks.getChildren(id),
           },
           {
-            nodeId: itemId,
-            parentId: data.parentId ?? null,
+            nodeId: localId,
+            parentId: localParentId,
             targetIndex: data.position ?? cur.index ?? 0,
           }
         );
@@ -1201,8 +1650,56 @@ export async function syncTransaction(): Promise<number> {
 
     let applied = 0;
     let failed = 0;
-    const wantsResync = res.changes.some((o) => o.operation === "resync");
+    const knownBefore = await getKnownServerIds();
+    const resyncChange = res.changes.find((o) => o.operation === "resync");
+    let expectedServerNodeCount: number | undefined;
+    let malformedResyncMarker = false;
+    if (resyncChange && knownBefore.size > 0) {
+      const data = resyncChange.data ?? {};
+      const hasRem = data.removed !== undefined && data.removed !== null;
+      const hasCre = data.created !== undefined && data.created !== null;
 
+      if (!hasRem && !hasCre) {
+        expectedServerNodeCount = undefined;
+      } else if (!hasRem || !hasCre) {
+        malformedResyncMarker = true;
+      } else {
+        const rem = Number(data.removed);
+        const cre = Number(data.created);
+        const valid =
+          Number.isInteger(rem) &&
+          rem >= 0 &&
+          Number.isInteger(cre) &&
+          cre >= 0 &&
+          knownBefore.size - rem + cre >= 0;
+
+        if (!valid) {
+          malformedResyncMarker = true;
+        } else {
+          expectedServerNodeCount = knownBefore.size - rem + cre;
+        }
+      }
+    }
+
+    if (malformedResyncMarker) {
+      await browser.storage.local.set({
+        recoveryRequired: {
+          reason: "unstable_server_tree",
+          detail: "Malformed or impossible resync marker metadata",
+          timestamp: Date.now(),
+          knownSize: knownBefore.size,
+          data: resyncChange?.data,
+        },
+      });
+      await log({
+        kind: "error",
+        title: "Sync paused: Malformed resync metadata",
+        detail: `Cannot compute expected server node count from resync marker: ${JSON.stringify(resyncChange?.data)}`,
+      });
+      await setSyncConfig({ globalEnabled: false });
+      return applied;
+    }
+    let reconcileAborted = false;
     for (const remote of res.changes) {
       if (remote.operation === "resync") continue;
       try {
@@ -1216,11 +1713,20 @@ export async function syncTransaction(): Promise<number> {
       }
     }
 
-    if (wantsResync) {
+    if (resyncChange) {
       try {
-        const r = await reconcileFromServer();
-        applied += r.deleted + r.created + r.updated + r.moved;
+        const r = await reconcileFromServer({
+          minimumServerVersion: res.currentServerVersion ?? 0,
+          expectedServerNodeCount,
+        });
+        if (r.aborted) {
+          reconcileAborted = true;
+          failed += 1;
+        } else {
+          applied += r.deleted + r.created + r.updated + r.moved;
+        }
       } catch (e) {
+        reconcileAborted = true;
         failed += 1;
         await log({
           kind: "error",
@@ -1236,6 +1742,10 @@ export async function syncTransaction(): Promise<number> {
         title: `${failed} remote change${failed === 1 ? "" : "s"} could not be applied`,
         detail: "Skipped so sync can continue.",
       });
+    }
+
+    if (reconcileAborted) {
+      return applied;
     }
 
     await setWatermark(res.serverTimestamp, res.currentServerVersion);

@@ -1881,7 +1881,7 @@ def restore_baseline(
         nodes_by_id[n.id] = n
 
     # Check parent validity and full graph cycle detection
-    protected_roots = {"0", "1", "2", "3"}
+    protected_roots = {"0", "1", "2", "3", "menu"}
     for nid, node in nodes_by_id.items():
         pid = node.parent_id
         if pid is not None and pid not in protected_roots:
@@ -1973,6 +1973,22 @@ def restore_baseline(
                     next_sort_key(), dom,
                 ),
             )
+
+        # Tombstone any active server nodes that are absent from the submitted baseline
+        active_rows = conn.execute(
+            "SELECT id FROM bookmarks WHERE cid = ? AND deleted = 0",
+            (cid,),
+        ).fetchall()
+        submitted_id_set = set(nodes_by_id.keys())
+        stale_ids = [r["id"] for r in active_rows if r["id"] not in submitted_id_set]
+        if stale_ids:
+            for i in range(0, len(stale_ids), 900):
+                batch = stale_ids[i:i+900]
+                placeholders = ",".join("?" for _ in batch)
+                conn.execute(
+                    f"UPDATE bookmarks SET deleted = 1 WHERE cid = ? AND id IN ({placeholders})",
+                    (cid, *batch),
+                )
 
         # 5. Emit one resync marker delta
         sv = _emit_resync(

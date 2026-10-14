@@ -34,10 +34,12 @@ function resetLocalTree() {
   ]);
 }
 
-function resetAll({ lastServerVersion }) {
+async function resetAll({ lastServerVersion }) {
   store.clear();
   store.set("endpoint", "http://test.local");
   store.set("token", "tok123");
+  store.set("collectionId", "col_test_123");
+  store.set("lio_migrated_col_test_123", true);
   store.set("deviceId", "dev_test");
   store.set("lastServerVersion", lastServerVersion);
   store.set("syncConfig", {
@@ -51,6 +53,11 @@ function resetAll({ lastServerVersion }) {
   resetLocalTree();
   moved = [];
   pushedOps = [];
+  await setMappings([
+    { serverId: "fA", localId: "fA" },
+    { serverId: "fB", localId: "fB" },
+    { serverId: "fC", localId: "fC" },
+  ]);
 }
 
 function toTree(id) {
@@ -116,7 +123,7 @@ globalThis.fetch = async (url, init = {}) => {
 };
 
 const { pushLocalOnlyNodes } = await import("../src/lib/bookmarks.ts");
-
+const { setMappings } = await import("../src/lib/idMap.ts");
 test("a server rearrangement made after our watermark wins and is applied locally", async () => {
   // Server order: Gamma, Alpha, Beta. Gamma was moved to the front at server
   // version 50 — AFTER this browser's watermark of 10, so it moved while we were
@@ -127,7 +134,7 @@ test("a server rearrangement made after our watermark wins and is applied locall
     { id: "fA", parent_id: "1", position: 1, title: "Alpha", url: null, is_folder: true, server_version: 51 },
     { id: "fB", parent_id: "1", position: 2, title: "Beta",  url: null, is_folder: true, server_version: 52 },
   ];
-  resetAll({ lastServerVersion: 10 });
+  await resetAll({ lastServerVersion: 10 });
 
   await pushLocalOnlyNodes();
 
@@ -155,7 +162,7 @@ test("a local move the server has already seen is still pushed up", async () => 
     { id: "fA", parent_id: "1", position: 1, title: "Alpha", url: null, is_folder: true, server_version: 7 },
     { id: "fB", parent_id: "1", position: 2, title: "Beta",  url: null, is_folder: true, server_version: 8 },
   ];
-  resetAll({ lastServerVersion: 90 });
+  await resetAll({ lastServerVersion: 90 });
 
   await pushLocalOnlyNodes();
 
@@ -173,7 +180,7 @@ test("an agreeing tree produces no moves in either direction", async () => {
     { id: "fB", parent_id: "1", position: 1, title: "Beta",  url: null, is_folder: true, server_version: 51 },
     { id: "fC", parent_id: "1", position: 2, title: "Gamma", url: null, is_folder: true, server_version: 52 },
   ];
-  resetAll({ lastServerVersion: 10 });
+  await resetAll({ lastServerVersion: 10 });
 
   await pushLocalOnlyNodes();
 

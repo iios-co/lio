@@ -209,3 +209,19 @@ def test_restore_baseline_838_node_convergence(client):
     tree_after = client.get(f"{_base()}/tree", headers=AUTH).json()
     assert len(tree_after["nodes"]) == 838
     assert tree_after["server_version"] > cur_ver
+
+
+def test_restore_baseline_accepts_canonical_menu_root(client):
+    tree0 = client.get(f"{_base()}/tree", headers=AUTH).json()
+    cur_ver = tree0["server_version"]
+    cur_count = len(tree0["nodes"])
+    r = client.post(f"{_base()}/restore-baseline", headers=AUTH, json={
+        "label": "menu root test",
+        "expected_server_version": cur_ver,
+        "expected_active_count": cur_count,
+        "nodes": [
+            {"id": "bm_menu_1", "parent_id": "menu", "is_folder": False, "title": "Menu Item", "url": "https://menu.example"},
+        ],
+    })
+    assert r.status_code == 200
+    assert r.json()["restored"] == 1

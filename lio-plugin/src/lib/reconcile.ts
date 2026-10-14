@@ -5,8 +5,8 @@
 import { api } from "./api";
 import { getSyncConfig } from "./config";
 import { walkInScope, buildScopeFilter } from "./bookmarks";
+import { getServerId, detectBrowserRoots } from "./idMap";
 import type { LeafRef } from "./treeDiff";
-
 export type { LeafRef, TreeDiff } from "./treeDiff";
 export { diffTrees, describeDiff, linkCount } from "./treeDiff";
 
@@ -30,14 +30,23 @@ export async function localNodes(): Promise<LeafRef[]> {
   const syncCfg = await getSyncConfig();
   const filter = buildScopeFilter(roots, syncCfg);
   const nodes = walkInScope(roots, filter);
-  return nodes.map((n) => ({
-    id: n.id,
-    parentId: n.parentId,
-    index: n.index,
-    title: n.title,
-    url: n.url,
-    isFolder: n.isFolder,
-  }));
+  const rootsInfo = await detectBrowserRoots();
+
+  const out: LeafRef[] = [];
+  for (const n of nodes) {
+    if (rootsInfo.allRootIds.has(n.id)) continue;
+    const serverId = await getServerId(n.id).catch(() => null);
+    const serverParentId = await getServerId(n.parentId).catch(() => null);
+    out.push({
+      id: serverId || `unmapped_${n.id}`,
+      parentId: serverParentId || (n.parentId ? `unmapped_${n.parentId}` : null),
+      index: n.index,
+      title: n.title,
+      url: n.url,
+      isFolder: n.isFolder,
+    });
+  }
+  return out;
 }
 
 /**
@@ -81,17 +90,22 @@ interface ServerNode {
   is_folder: boolean;
 }
 
+const CANONICAL_SERVER_ROOT_IDS = new Set(["0", "1", "2", "3", "menu"]);
+
 /** The server's view of the same collection. Null when it could not be read —
- *  the caller must NOT treat that as "matched". */
+ *  the caller must NOT treat that as "matched". Canonical root folders (0, 1, 2, 3, menu)
+ *  are excluded so the comparison mirrors localNodes(). */
 export async function serverNodes(): Promise<LeafRef[] | null> {
   const res = await api.getTree();
   if (!res) return null;
-  return (res.nodes as ServerNode[]).map((n) => ({
-    id: n.id,
-    parentId: n.parent_id ?? null,
-    index: n.position ?? 0,
-    title: n.title ?? "",
-    url: n.url ?? null,
-    isFolder: !!n.is_folder,
-  }));
+  return (res.nodes as ServerNode[])
+    .filter((n) => !CANONICAL_SERVER_ROOT_IDS.has(n.id))
+    .map((n) => ({
+      id: n.id,
+      parentId: n.parent_id ?? null,
+      index: n.position ?? 0,
+      title: n.title ?? "",
+      url: n.url ?? null,
+      isFolder: !!n.is_folder,
+    }));
 }

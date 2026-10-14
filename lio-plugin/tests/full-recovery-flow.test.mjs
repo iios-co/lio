@@ -17,13 +17,14 @@ let baselineRestoreCalls = 0;
 
 const localTree = new Map([
   ["0", { id: "0", title: "", parentId: undefined, index: 0, children: ["1"] }],
-  ["1", { id: "1", title: "Bookmarks bar", parentId: "0", index: 0, children: [] }],
+  ["1", { id: "1", title: "Bookmarks bar", parentId: "0", index: 0, children: ["f_1"] }],
+  ["f_1", { id: "f_1", title: "Work Folder", parentId: "1", index: 0, children: [] }],
 ]);
 
 for (let i = 1; i <= 838; i++) {
   const id = `bm_${i}`;
-  localTree.get("1").children.push(id);
-  localTree.set(id, { id, title: `Bookmark ${i}`, url: `https://example.com/${i}`, parentId: "1", index: i - 1 });
+  localTree.get("f_1").children.push(id);
+  localTree.set(id, { id, title: `Bookmark ${i}`, url: `https://example.com/${i}`, parentId: "f_1", index: i - 1 });
 }
 
 function toTree(id) {
@@ -122,6 +123,7 @@ const { pushLocalOnlyNodes, restoreBaselineFromLocal } = await import("../src/li
 test("full end-to-end recovery: dynamic rejection -> recoveryRequired -> explicit confirmed restore -> zero drift", async () => {
   store.set("endpoint", "http://test.local");
   store.set("token", "tok_test");
+  store.set("collectionId", "col_test_123");
   store.set("deviceId", "dev_test");
   store.set("lastPulledTs", 500);
   store.set("lastServerVersion", 10);
@@ -142,7 +144,7 @@ test("full end-to-end recovery: dynamic rejection -> recoveryRequired -> explici
   assert.ok(recState, "recoveryRequired state must be set");
   assert.equal(recState.reason, "tombstone_rejection");
   assert.equal(recState.skipped, 839);
-  assert.equal(recState.localNodeCount, 839, "839 total nodes in scope");
+  assert.equal(recState.localNodeCount, 840, "840 total nodes in scope (including root '1')");
   assert.equal(recState.localLinkCount, 838, "838 bookmark links in scope");
   assert.equal(recState.serverNodeCount, 0);
 
@@ -179,5 +181,5 @@ test("full end-to-end recovery: dynamic rejection -> recoveryRequired -> explici
   assert.equal(cycle2.deletedLocally, 0, "Subsequent cycle 2 deletes 0");
 
   assert.equal(deltaPostCount, initialPostCount, "Zero additional delta posts made across subsequent cycles");
-  assert.equal(localTree.size, 840, "All 838 local bookmarks and 2 roots remain completely intact");
+  assert.equal(localTree.size, 841, "All 838 local bookmarks, 1 folder, and 2 roots remain completely intact");
 });

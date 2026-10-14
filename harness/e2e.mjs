@@ -158,7 +158,36 @@ try {
   await extPage.goto(`chrome-extension://${extId}/popup.html`, { waitUntil: "domcontentloaded" });
 
   const msg = (m) => extPage.evaluate((mm) => chrome.runtime.sendMessage(mm), m);
-
+  const serverToLocalIds = async (ids, serverNodesContext = []) => {
+    const res = await extPage.evaluate(async (sids) => {
+      const { collectionId } = await chrome.storage.local.get("collectionId");
+      if (!collectionId) return { collectionId: null, mapped: [], allKeys: [] };
+      const storeKey = `lio_id_map_${collectionId}`;
+      const data = await chrome.storage.local.get(storeKey);
+      const map = data[storeKey]?.serverToLocal ?? {};
+      return {
+        collectionId,
+        mapped: sids.map((s) => map[s] ?? null),
+        allKeys: Object.keys(map),
+      };
+    }, ids);
+    if (!res.collectionId) {
+      throw new Error("harness: collectionId missing in extension storage");
+    }
+    const missing = ids.filter((_, idx) => !res.mapped[idx]);
+    if (missing.length > 0) {
+      const missingDetails = missing.map((sid) => {
+        const found = serverNodesContext.find((n) => n.id === sid);
+        return found ? `${sid}("${found.title}", ${found.url})` : sid;
+      });
+      throw new Error(`harness: missing local ID mapping for server IDs: ${missingDetails.join(", ")} | available map keys (${res.allKeys.length}): ${res.allKeys.join(", ")}`);
+    }
+    return res.mapped;
+  };
+  const getMappedLocalId = async (serverId, serverNodesContext = []) => {
+    const list = await serverToLocalIds([serverId], serverNodesContext);
+    return list[0];
+  };
   // 2. Extension reads the local tree.
   const seen = await extPage.evaluate(async () => {
     const out = [];
@@ -208,13 +237,20 @@ try {
   // Wait for bootstrap sync to complete
   await sleep(3000);
   let tree = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-  const serverLinks = (tree.json?.nodes ?? []).filter((n) => !n.is_folder);
+  const serverNodes = tree.json?.nodes ?? [];
+  const serverLinks = serverNodes.filter((n) => !n.is_folder);
   check("extension: push local changes to the server",
     serverLinks.length === 6, `server has ${serverLinks.length} of 6 links`);
+  const serverWork = serverNodes.find((n) => n.title === "Work" && n.is_folder);
+  const serverNestedOne = serverNodes.find((n) => n.title === "Nested One");
+  const serverNestedTwo = serverNodes.find((n) => n.title === "Nested Two");
+  const serverAlpha = serverNodes.find((n) => n.title === "Alpha");
+  const serverBeta = serverNodes.find((n) => n.title === "Beta");
+  const serverAlphaCopy = serverNodes.find((n) => n.title === "Alpha copy");
+  const serverLive = serverNodes.find((n) => n.title === "Live");
   check("server: store the bookmark collection (links, folders, titles, positions)",
-    (tree.json?.nodes ?? []).some((n) => n.title === "Nested One" && n.parent_id === "13"),
+    !!serverNestedOne && !!serverWork && serverNestedOne.parent_id === serverWork.id,
     "nested link kept its parent");
-
   // Live dashboard verification: assert card updated live from 0 -> 6 without reload
   let liveCount = 0;
   for (let i = 0; i < 20; i++) {
@@ -271,9 +307,9 @@ try {
   await dashPage.goto(`${BASE}/#/c/${token}`);
   const expandAll = await dashPage.waitForSelector('button:has-text("Expand all")');
   await expandAll.click();
-  await dashPage.waitForSelector('[data-node-id="14"]');
-  // Locate stable row for node 14
-  const row14 = dashPage.locator('[data-node-id="14"]');
+  await dashPage.waitForSelector(`[data-node-id="${serverNestedOne.id}"]`);
+  // Locate stable row for nested one
+  const row14 = dashPage.locator(`[data-node-id="${serverNestedOne.id}"]`);
   // 1. Click title to edit title in row 14
   const titleBtn = row14.locator('button:has-text("Nested One")');
   await titleBtn.click();
@@ -286,7 +322,7 @@ try {
   let server14;
   for (let i = 0; i < 20; i++) {
     const t = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-    server14 = (t.json?.nodes ?? []).find((n) => n.id === "14");
+    server14 = (t.json?.nodes ?? []).find((n) => n.id === serverNestedOne.id);
     if (server14?.title === "Nested Updated Title") break;
     await sleep(200);
   }
@@ -305,7 +341,7 @@ try {
   // Poll server: URL updated, untouched title preserved
   for (let i = 0; i < 20; i++) {
     const t = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-    server14 = (t.json?.nodes ?? []).find((n) => n.id === "14");
+    server14 = (t.json?.nodes ?? []).find((n) => n.id === serverNestedOne.id);
     if (server14?.url === "https://nested.example/new-path") break;
     await sleep(200);
   }
@@ -342,9 +378,13 @@ try {
   await sleep(3000);
   tree = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
   const byId = Object.fromEntries((tree.json?.nodes ?? []).map((n) => [n.id, n]));
+  const gammaServer = (tree.json?.nodes ?? []).find((n) => n.title === "Gamma");
+  const betaServer = byId[serverBeta?.id];
+  const alphaServer = byId[serverAlpha?.id];
+  const alphaCopyServer = byId[serverAlphaCopy?.id];
   check("extension: detect local bookmark changes (create, rename, move, delete)",
-    !!byId[newId] && byId["11"]?.title === "Beta Renamed" && byId["10"]?.parent_id === "13" && !byId["12"],
-    `create=${!!byId[newId]} rename=${byId["11"]?.title === "Beta Renamed"} move=${byId["10"]?.parent_id === "13"} delete=${!byId["12"]}`);
+    !!gammaServer && betaServer?.title === "Beta Renamed" && alphaServer?.parent_id === serverWork?.id && !alphaCopyServer,
+    `create=${!!gammaServer} rename=${betaServer?.title === "Beta Renamed"} move=${alphaServer?.parent_id === serverWork?.id} delete=${!alphaCopyServer}`);
 
   // 7. Visit tracking.
   const visitPage = await ctx.newPage();
@@ -395,9 +435,11 @@ try {
 
   // 11. THE CRITICAL ONE: a server-side change must reach the real browser.
   const dupesBefore = onDiskTree(profile);
+  const targetServerNode = betaServer || alphaServer;
+  const targetLocalId = await getMappedLocalId(targetServerNode.id);
   const reorg = await api(`/api/v1/collections/${token}/bookmarks/reorganize`, {
     method: "POST", token,
-    body: { label: "Delete duplicates", removed: [byId["11"] ? "11" : "10"] },
+    body: { label: "Delete duplicates", removed: [targetServerNode.id] },
   });
   check("server: apply bulk transactional reorganisation", reorg.status === 200,
     `status ${reorg.status}`);
@@ -410,15 +452,11 @@ try {
     walk((await chrome.bookmarks.getTree())[0]);
     return out;
   });
-  const removedId = byId["11"] ? "11" : "10";
   check("extension: pull server changes and apply them to the local browser tree",
-    !localAfter.includes(removedId),
-    `node ${removedId} ${localAfter.includes(removedId) ? "STILL in browser" : "removed from browser"}`);
+    !localAfter.includes(targetLocalId),
+    `node ${targetLocalId} ${localAfter.includes(targetLocalId) ? "STILL in browser" : "removed from browser"}`);
 
   // 11b. A server-side deletion must NOT be resurrected by the repair step.
-  // This is the hazard the repair step introduces: a local-only node is either
-  // "never sent" (push it) or "server deleted it" (do not). Sync twice and assert
-  // the removed node stays gone on BOTH sides.
   await msg({ type: "SYNC_NOW" });
   await sleep(3500);
   const afterSecondSync = await extPage.evaluate(async () => {
@@ -428,16 +466,18 @@ try {
     return out;
   });
   const serverAfterSecond = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-  const serverHasIt = new Set((serverAfterSecond.json?.nodes ?? []).map((n) => n.id)).has(removedId);
+  const serverHasIt = new Set((serverAfterSecond.json?.nodes ?? []).map((n) => n.id)).has(targetServerNode.id);
   check("a server-side deletion is not resurrected by the repair step",
-    !afterSecondSync.includes(removedId) && !serverHasIt,
-    `browser=${afterSecondSync.includes(removedId) ? "RESURRECTED" : "gone"} server=${serverHasIt ? "RESURRECTED" : "gone"}`);
+    !afterSecondSync.includes(targetLocalId) && !serverHasIt,
+    `browser=${afterSecondSync.includes(targetLocalId) ? "RESURRECTED" : "gone"} server=${serverHasIt ? "RESURRECTED" : "gone"}`);
+
 
   // 11c. LAST-WRITE-WINS AT TREE LEVEL. Delete several nodes server-side, let the
   // browser consume (and ignore) nothing — then sync. The server wrote most
   // recently, so the browser must DROP those nodes, not push them back.
   const treeNow = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
   const victims = (treeNow.json?.nodes ?? []).filter((n) => !n.is_folder).slice(0, 3).map((n) => n.id);
+  const victimLocalIds = await serverToLocalIds(victims, treeNow.json?.nodes ?? []);
   await api(`/api/v1/collections/${token}/bookmarks/reorganize`, {
     method: "POST", token, body: { label: "LWW test delete", removed: victims },
   });
@@ -452,14 +492,13 @@ try {
   const srvAfter = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
   const srvIds = new Set((srvAfter.json?.nodes ?? []).map((n) => n.id));
   check("last-write-wins: a newer SERVER tree wins over the browser",
-    victims.every((v) => !localIds.includes(v)) && victims.every((v) => !srvIds.has(v)),
-    `${victims.filter((v) => localIds.includes(v)).length} still in browser, ${victims.filter((v) => srvIds.has(v)).length} resurrected on server`);
+    victimLocalIds.every((v) => !localIds.includes(v)) && victims.every((v) => !srvIds.has(v)),
+    `${victimLocalIds.filter((v) => localIds.includes(v)).length} still in browser, ${victims.filter((v) => srvIds.has(v)).length} resurrected on server`);
 
   // 11d. A DETECTED DIFFERENCE MUST TRIGGER A SYNC BY ITSELF.
-  // Delete server-side, then only ask for STATUS — never SYNC_NOW. Opening the
-  // popup is enough: the difference is a trigger, so the browser must converge.
   const t2 = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
   const victim2 = (t2.json?.nodes ?? []).filter((n) => !n.is_folder).slice(0, 1).map((n) => n.id);
+  const victim2Local = victim2.length > 0 ? await getMappedLocalId(victim2[0], t2.json?.nodes ?? []) : null;
   await api(`/api/v1/collections/${token}/bookmarks/reorganize`, {
     method: "POST", token, body: { label: "auto-converge test", removed: victim2 },
   });
@@ -473,15 +512,16 @@ try {
     return out;
   });
   check("a detected difference triggers a sync on its own (no SYNC_NOW)",
-    reportedWorking && !localIds2.includes(victim2[0]),
-    `reportedWorking=${reportedWorking} stillInBrowser=${localIds2.includes(victim2[0])}`);
+    reportedWorking && !localIds2.includes(victim2Local),
+    `reportedWorking=${reportedWorking} stillInBrowser=${localIds2.includes(victim2Local)}`);
 
   // 11f. REAL-TIME PUSH: Server mutation immediately pushes to browser via WebSocket (<1s).
   // Delete a bookmark server-side, do NOT call STATUS, do NOT call SYNC_NOW.
   const tPush = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-  const pushVictim = (tPush.json?.nodes ?? []).filter((n) => !n.is_folder && n.id !== "10" && n.id !== "16").slice(0, 1).map((n) => n.id);
-  if (pushVictim.length > 0) {
-    const deletedPushId = pushVictim[0];
+  const pushVictims = (tPush.json?.nodes ?? []).filter((n) => !n.is_folder && n.id !== serverAlpha?.id && n.id !== serverLive?.id).slice(0, 1).map((n) => n.id);
+  if (pushVictims.length > 0) {
+    const deletedPushId = pushVictims[0];
+    const pushVictimLocal = await getMappedLocalId(deletedPushId);
     await api(`/api/v1/collections/${token}/bookmarks/${deletedPushId}`, { method: "DELETE", token });
     await sleep(800); // <1 second wait for real-time WebSocket push
     const browserAfterPush = await extPage.evaluate(async () => {
@@ -491,8 +531,8 @@ try {
       return out;
     });
     check("push service: server mutation is mirrored in browser in real time (<1s, zero polling)",
-      !browserAfterPush.includes(deletedPushId),
-      `node ${deletedPushId} removed from browser via push`);
+      !browserAfterPush.includes(pushVictimLocal),
+      `node ${deletedPushId} (local ${pushVictimLocal}) removed from browser via push`);
   }
 
   // 11e. REGRESSION for real data loss (2026-09-10 11:46): with no id history,
@@ -600,11 +640,11 @@ try {
   await msg({ type: "TOGGLE_PAIR", pairId: defaultPairId, enabled: true });
   await sleep(600);
   const beforeRepair = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-  const knownBefore = new Set((beforeRepair.json?.nodes ?? []).map((n) => n.id)).has(orphanId);
+  const knownBefore = (beforeRepair.json?.nodes ?? []).some((n) => n.url === "https://missed.example/" && n.title === "MissedCreate");
   await msg({ type: "SYNC_NOW" });
   await sleep(3500);
   const afterRepair = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-  const knownAfter = new Set((afterRepair.json?.nodes ?? []).map((n) => n.id)).has(orphanId);
+  const knownAfter = (afterRepair.json?.nodes ?? []).some((n) => n.url === "https://missed.example/" && n.title === "MissedCreate");
   check("D9: a SMALL gap is self-healed, and history exists to trust it",
     !knownBefore && knownAfter,
     `beforeSync=${knownBefore} afterSync=${knownAfter}`);
@@ -631,18 +671,23 @@ try {
   // 18. Sync pairs must LIMIT scope: a node outside the pair folder must not sync.
   // Swap the "everything" pair for one scoped to the "Work" folder (id 13).
   await msg({ type: "REMOVE_PAIR", pairId: defaultPairId });
-  await msg({ type: "ADD_PAIR", pair: { id: "p2", type: "bookmark", localFolderId: "13", localFolderName: "Work", collectionPath: "/Work", enabled: true } });
+  const workLocalId = await extPage.evaluate(async () => {
+    const nodes = await chrome.bookmarks.search({ title: "Work" });
+    return nodes.find((n) => !n.url)?.id || "13";
+  });
+  await msg({ type: "ADD_PAIR", pair: { id: "p2", type: "bookmark", localFolderId: workLocalId, localFolderName: "Work", collectionPath: "/Work", enabled: true } });
   await sleep(1500);
-  const inScopeId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "13", title: "InScope", url: "https://inscope.example/" })).id);
+  const inScopeId = await extPage.evaluate(async (pid) => (await chrome.bookmarks.create({ parentId: pid, title: "InScope", url: "https://inscope.example/" })).id, workLocalId);
   const outScopeId = await extPage.evaluate(async () => (await chrome.bookmarks.create({ parentId: "1", title: "OutOfScope", url: "https://outscope.example/" })).id);
   await sleep(1500);
   await msg({ type: "SYNC_NOW" });
   await sleep(3500);
   const scoped = await api(`/api/v1/collections/${token}/bookmarks/tree`, { token });
-  const scopedIds = new Set((scoped.json?.nodes ?? []).map((n) => n.id));
+  const hasInScope = (scoped.json?.nodes ?? []).some((n) => n.url === "https://inscope.example/" && n.title === "InScope");
+  const hasOutScope = (scoped.json?.nodes ?? []).some((n) => n.url === "https://outscope.example/" && n.title === "OutOfScope");
   check("extension: limit what syncs via sync pairs (folder scope)",
-    scopedIds.has(inScopeId) && !scopedIds.has(outScopeId),
-    `inScope=${scopedIds.has(inScopeId)} outOfScope-leaked=${scopedIds.has(outScopeId)}`);
+    hasInScope && !hasOutScope,
+    `inScope=${hasInScope} outOfScope-leaked=${hasOutScope}`);
   // 19. Fresh device test: 0 local bookmarks merging with nonempty server collection
   const freshProfile = path.join(SCRATCH, `e2e_fresh_${Date.now()}`);
   fs.mkdirSync(freshProfile, { recursive: true });

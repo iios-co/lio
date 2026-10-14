@@ -80,6 +80,14 @@ globalThis.browser = {
 
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
+  if (u.includes("/info")) {
+    return new Response(JSON.stringify({
+      id: "col_test_123",
+      name: "Resume",
+      bookmark_count: 0,
+      folder_count: 1,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (u.endsWith("/bookmarks/tree")) {
     return new Response(JSON.stringify({
       nodes: [
@@ -104,6 +112,8 @@ const { pushLocalOnlyNodes, reconcileFromServer } = await import("../src/lib/boo
 test("resuming sync (TOGGLE_GLOBAL) with 914 local bookmarks against empty server never deletes local nodes", async () => {
   store.set("endpoint", "http://test.local");
   store.set("token", "tok_test");
+  store.set("collectionId", "col_test_123");
+  store.set("lio_migrated_col_test_123", true);
   store.set("deviceId", "dev_test");
   store.set("lastPulledTs", 500);
   store.set("lastServerVersion", 1);

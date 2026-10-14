@@ -25,6 +25,7 @@ const SERVER_ROWS = [
 const store = new Map([
   ["endpoint", "http://test.local"],
   ["token", "tok123"],
+  ["collectionId", "col_test_123"],
   ["deviceId", "dev_test"],
   ["syncConfig", {
     globalEnabled: true,
@@ -95,9 +96,12 @@ globalThis.fetch = async (url) => {
       status: 200, headers: { "Content-Type": "application/json" },
     });
   }
-  return new Response(JSON.stringify({ applied: 0, server_version: 2 }), {
-    status: 200, headers: { "Content-Type": "application/json" },
-  });
+  if (u.endsWith("/bookmarks/delta")) {
+    return new Response(JSON.stringify({ applied: 999, server_version: 2 }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  }
+  return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 };
 
 const { bootstrap } = await import("../src/lib/bookmarks.ts");

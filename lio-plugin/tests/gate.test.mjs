@@ -41,7 +41,7 @@ globalThis.fetch = async (url) => {
   if (u.includes("/info")) {
     if (mode === "badtoken") return { ok: false, status: 404 };
     if (mode === "server500") return { ok: false, status: 503 };
-    return { ok: true, status: 200, json: async () => ({ name: "Personal", bookmark_count: 7 }) };
+    return { ok: true, status: 200, json: async () => ({ id: "col_1", name: "Personal", bookmark_count: 7 }) };
   }
   return { ok: true, status: 200, json: async () => ({}) };
 };

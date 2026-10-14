@@ -66,7 +66,23 @@ async function probe(): Promise<Gate> {
       signal: AbortSignal.timeout(10000), // 10 second timeout so gate never hangs
     });
     if (r.ok) {
-      const info = (await r.json()) as { name?: string | null; bookmark_count?: number; last_change_at?: number | null };
+      const info = (await r.json()) as { id?: string; name?: string | null; bookmark_count?: number; last_change_at?: number | null };
+      if (!info?.id) {
+        return { state: "unreachable", checkedAt: now, detail: "Server did not provide a stable collection ID.", collectionName: null, serverBookmarkCount: null, serverLastChangeAt: null };
+      }
+      if (!cfg.collectionId) {
+        const { setConfig } = await import("./config");
+        await setConfig({ collectionId: info.id });
+      } else if (cfg.collectionId !== info.id) {
+        return {
+          state: "invalid-token",
+          checkedAt: now,
+          detail: "Collection identity mismatch: this token resolves to a different collection than currently configured.",
+          collectionName: null,
+          serverBookmarkCount: null,
+          serverLastChangeAt: null,
+        };
+      }
       return {
         state: "ok",
         checkedAt: now,
