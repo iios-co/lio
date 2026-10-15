@@ -19,6 +19,7 @@ import { getLog, clearLog, log } from "@/lib/log";
 import { checkGate, resetGate } from "@/lib/gate";
 import { api } from "@/lib/api";
 import { pushService } from "@/lib/push";
+import { getServerId } from "@/lib/idMap";
 
 import { SyncCoordinator } from "@/lib/syncCoordinator";
 const SYNC_ALARM = "lio-sync";
@@ -283,22 +284,10 @@ export default defineBackground(() => {
               };
 
               for (const pair of bookmarkPairs) {
-                const pairLocal = pairLocalNodes.get(pair.id) ?? [];
-                const pairLocalCount = linkCount(pairLocal);
+                const rawLocal = pairLocalNodes.get(pair.id) ?? [];
+                const pairLocalCount = linkCount(rawLocal);
 
-                if (serverTree) {
-                  const serverIds = getSubtreeIds(pair.localFolderId, serverTree);
-                  const pairServer = serverTree.filter((n) => serverIds.has(n.id) && (pair.localFolderId ? n.id !== pair.localFolderId : true));
-                  const pairServerCount = linkCount(pairServer);
-                  const pairDiff = diffTrees(pairLocal, pairServer);
-                  pairStats[pair.id] = {
-                    localCount: pairLocalCount,
-                    serverCount: pairServerCount,
-                    identical: pairDiff.identical,
-                    differences: pairDiff.differences,
-                    detail: describeDiff(pairDiff),
-                  };
-                } else {
+                if (!serverTree) {
                   pairStats[pair.id] = {
                     localCount: pairLocalCount,
                     serverCount: 0,
@@ -306,7 +295,55 @@ export default defineBackground(() => {
                     differences: 0,
                     detail: "Server unreadable",
                   };
+                  continue;
                 }
+
+                if (!pair.localFolderId && diff) {
+                  // "Everything" pair covers the entire in-scope tree, which is exactly diff.
+                  pairStats[pair.id] = {
+                    localCount: pairLocalCount,
+                    serverCount: diff.serverLinks,
+                    identical: diff.identical,
+                    differences: diff.differences,
+                    detail: describeDiff(diff),
+                  };
+                  continue;
+                }
+
+                const serverFolderId = pair.localFolderId
+                  ? await getServerId(pair.localFolderId).catch(() => null)
+                  : "";
+
+                if (pair.localFolderId && !serverFolderId) {
+                  pairStats[pair.id] = {
+                    localCount: pairLocalCount,
+                    serverCount: 0,
+                    identical: false,
+                    differences: pairLocalCount,
+                    detail: "Folder not yet on server",
+                  };
+                  continue;
+                }
+
+                const serverIds = getSubtreeIds(serverFolderId ?? "", serverTree);
+                const pairServer = serverTree.filter(
+                  (n) => serverIds.has(n.id) && (serverFolderId ? n.id !== serverFolderId : true)
+                );
+                const pairServerCount = linkCount(pairServer);
+
+                const localIds = getSubtreeIds(serverFolderId ?? "", localTree);
+                const pairLocalMapped = localTree.filter(
+                  (n) => localIds.has(n.id) && (serverFolderId ? n.id !== serverFolderId : true)
+                );
+                const pairDiff = diffTrees(pairLocalMapped, pairServer);
+
+                pairStats[pair.id] = {
+                  localCount: pairLocalCount,
+                  serverCount: pairServerCount,
+                  identical: pairDiff.identical,
+                  differences: pairDiff.differences,
+                  detail: describeDiff(pairDiff),
+                };
               }
             }
 
