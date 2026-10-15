@@ -67,7 +67,7 @@ class DeltaPushRequest(BaseModel):
     """Batch of ops from one device. ``device_id`` tags each op's origin so the
     pull endpoint can exclude the sender's own changes (echo suppression)."""
     device_id: str
-    ops: list[DeltaOpIn] = Field(..., max_length=1000)
+    ops: list[DeltaOpIn] = Field(..., max_length=50000)
 
 
 class DeltaPushResponse(BaseModel):
@@ -122,7 +122,7 @@ class SyncBatchRequest(BaseModel):
 
     client_id: str = Field(..., alias="clientId")
     last_server_version: int = Field(0, alias="lastServerVersion")
-    operations: list[SyncOperation] = Field(default_factory=list, max_length=1000)
+    operations: list[SyncOperation] = Field(default_factory=list, max_length=50000)
 
 
 class DeltaChangeData(BaseModel):
@@ -280,7 +280,7 @@ class RestoreBaselineRequest(BaseModel):
     label: str = Field(..., max_length=120, description="Audit reason for restore, e.g. 'Restore from Chrome backup'")
     expected_server_version: int = Field(..., ge=0, description="Optimistic lock: current server_version must match.")
     expected_active_count: int = Field(..., ge=0, description="Optimistic lock: current undeleted node count must match.")
-    nodes: list[RestoreBaselineNodeIn] = Field(..., max_length=5000)
+    nodes: list[RestoreBaselineNodeIn] = Field(..., max_length=50000)
 
 class RestoreBaselineResponse(BaseModel):
     restored: int

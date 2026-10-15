@@ -1015,9 +1015,11 @@ async function bootstrapBrowserAuthoritative(): Promise<{
   const localNodeMap = new Map(inScopeNodes.map((n) => [n.id, n]));
   const localMergeMap = new Map(localMerge.map((n) => [n.id, n]));
 
+  const isRoot = (id: string | null | undefined): boolean => !id || rootsInfo.allRootIds.has(id);
   for (const lid of plan.localOnly) {
     const n = localMergeMap.get(lid);
     if (!n) continue;
+    if (isRoot(n.id)) continue;
     let serverId = localToCanonical.get(n.id) ?? (await getServerId(n.id).catch(() => null));
     if (!serverId) {
       serverId = mintServerId();
@@ -1026,13 +1028,14 @@ async function bootstrapBrowserAuthoritative(): Promise<{
     }
 
     let serverParentId: string | null = null;
-    if (n.parentId) {
+    if (n.parentId && !isRoot(n.parentId)) {
       serverParentId = localToCanonical.get(n.parentId) ?? (await getServerId(n.parentId).catch(() => null));
-      if (!serverParentId) {
-        throw new Error(`Unresolvable parent ${n.parentId} for local bookmark ${n.id} (${n.title})`);
-      }
+    } else if (n.parentId) {
+      serverParentId = await canonicalServerRootForLocal(n.parentId);
     }
-
+    if (!serverParentId) {
+      serverParentId = "1";
+    }
     const realIndex = localNodeMap.get(n.id)?.index ?? 0;
     ops.push({
       op: "create",

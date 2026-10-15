@@ -111,7 +111,23 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       let detail = res.statusText;
       try {
         const j = await res.json();
-        if (j?.detail) detail = j.detail;
+        if (j?.detail) {
+          if (typeof j.detail === "string") {
+            detail = j.detail;
+          } else if (Array.isArray(j.detail)) {
+            detail = j.detail
+              .map((d: unknown) => {
+                if (d && typeof d === "object") {
+                  if ("msg" in d && typeof d.msg === "string") return d.msg;
+                  if ("detail" in d && typeof d.detail === "string") return d.detail;
+                }
+                return JSON.stringify(d);
+              })
+              .join("; ");
+          } else {
+            detail = JSON.stringify(j.detail);
+          }
+        }
       } catch { /* non-JSON */ }
       throw new ApiError(res.status, detail);
     }
@@ -158,10 +174,28 @@ export const api = {
   getTree: () => request<{ nodes: unknown[]; server_timestamp: number; server_version?: number }>("GET", "/bookmarks/tree"),
   syncBookmarks: (req: SyncBatchRequest) =>
     request<SyncBatchResponse>("POST", "/bookmarks/sync", req),
-  pushDelta: (deviceId: string, ops: DeltaOp[]) =>
-    request<{ applied: number; skipped_stale: number; server_timestamp: number }>(
-      "POST", "/bookmarks/delta", { device_id: deviceId, ops }
-    ),
+  pushDelta: async (deviceId: string, ops: DeltaOp[]) => {
+    const CHUNK_SIZE = 5000;
+    if (ops.length <= CHUNK_SIZE) {
+      return request<{ applied: number; skipped_stale: number; server_timestamp: number }>(
+        "POST", "/bookmarks/delta", { device_id: deviceId, ops }
+      );
+    }
+    let applied = 0;
+    let skipped_stale = 0;
+    let server_timestamp = 0;
+    for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+      const chunk = ops.slice(i, i + CHUNK_SIZE);
+      const res = await request<{ applied: number; skipped_stale: number; server_timestamp: number }>(
+        "POST", "/bookmarks/delta", { device_id: deviceId, ops: chunk }
+      );
+      if (!res) return null;
+      applied += res.applied ?? 0;
+      skipped_stale += res.skipped_stale ?? 0;
+      server_timestamp = res.server_timestamp ?? server_timestamp;
+    }
+    return { applied, skipped_stale, server_timestamp };
+  },
   pullDelta: (since: number, deviceId: string) =>
     request<{ ops: { op: string; node_id: string; payload: DeltaOp; timestamp: number }[]; server_timestamp: number }>(
       "GET", `/bookmarks/delta?since=${since}&device_id=${encodeURIComponent(deviceId)}`

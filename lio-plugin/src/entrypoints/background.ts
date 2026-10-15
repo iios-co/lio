@@ -132,7 +132,18 @@ export default defineBackground(() => {
           reconnecting = false;
         } catch (e) {
           reconnecting = false;
-          const message = (e as Error).message || String(e);
+          let message = "Unknown error";
+          if (e instanceof Error) {
+            message = e.message;
+          } else if (typeof e === "string") {
+            message = e;
+          } else if (e && typeof e === "object") {
+            try {
+              message = JSON.stringify(e);
+            } catch {
+              message = String(e);
+            }
+          }
           await browser.storage.local.set({
             lastSyncError: { at: Date.now(), step, message },
           });
