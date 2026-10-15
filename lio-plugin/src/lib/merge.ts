@@ -205,17 +205,11 @@ export function planMerge(
     ids.slice().sort((a, b) => depthOf(a, byId) - depthOf(b, byId));
 
   const localOnly = byDepth(
-    local
-      .filter((n) => !matchedLocal.has(n.id))
-      .filter((n) => !n.isFolder || hasUnmatchedLink(n, local, matchedLocal))
-      .map((n) => n.id),
+    local.filter((n) => !matchedLocal.has(n.id)).map((n) => n.id),
     localById
   );
   const serverPull = byDepth(
-    server
-      .filter((n) => !matchedServer.has(n.id))
-      .filter((n) => !n.isFolder || hasUnmatchedLink(n, server, matchedServer))
-      .map((n) => n.id),
+    server.filter((n) => !matchedServer.has(n.id)).map((n) => n.id),
     serverById
   );
 
@@ -230,23 +224,4 @@ function depthOf(id: string, byId: Map<string, MergeNode>): number {
     cur = byId.get(cur)?.parentId ?? null;
   }
   return d;
-}
-
-/** A local folder is only pushed up if it still contains a link that wasn't
- *  matched to a server row — otherwise the server already has an equivalent
- *  folder and re-creating it would be a structural duplicate. */
-function hasUnmatchedLink(
-  folder: MergeNode,
-  all: MergeNode[],
-  matched: Set<string>
-): boolean {
-  const children = all.filter((n) => n.parentId === folder.id);
-  for (const c of children) {
-    if (c.isFolder) {
-      if (hasUnmatchedLink(c, all, matched)) return true;
-    } else if (!matched.has(c.id)) {
-      return true;
-    }
-  }
-  return false;
 }

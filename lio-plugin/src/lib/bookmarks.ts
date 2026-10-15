@@ -40,6 +40,12 @@ let applyingDepth = 0;
 export function isApplyingRemote(): boolean {
   return applyingDepth > 0;
 }
+async function clearRecoveryIncident(): Promise<void> {
+  if (typeof browser.storage?.local?.remove === "function") {
+    await browser.storage.local.remove("recoveryRequired").catch(() => null);
+  }
+}
+
 
 // ---- Sync scope: does a bookmark node fall within an enabled sync pair? -----
 
@@ -852,6 +858,9 @@ export async function reconcileFromServer(
 
   // Update knownServerIds
   await setKnownServerIds(server.map((s) => s.id));
+  const migrationKey = `lio_migrated_${cfg.collectionId || "default"}`;
+  await browser.storage.local.set({ [migrationKey]: true });
+  await clearRecoveryIncident();
 
   // CRITICAL INVARIANT: ZERO API calls to pushDelta or syncBookmarks!
   await log({
@@ -1040,7 +1049,7 @@ async function bootstrapBrowserAuthoritative(): Promise<{
 
   if (ops.length) {
     const pushRes = await api.pushDelta(cfg.deviceId, ops);
-    if (!pushRes || pushRes.applied !== ops.length || (pushRes.skipped_stale ?? 0) > 0) {
+    if (!pushRes || (pushRes.applied ?? 0) < ops.length || (pushRes.skipped_stale ?? 0) > 0) {
       throw new Error(`Merge push rejected or incomplete: applied ${pushRes?.applied ?? 0} of ${ops.length}, skipped_stale ${pushRes?.skipped_stale ?? 0}`);
     }
   }
@@ -1055,6 +1064,9 @@ async function bootstrapBrowserAuthoritative(): Promise<{
   if (afterRes) {
     await setKnownServerIds((afterRes.nodes as { id: string }[]).map((n) => n.id));
   }
+  const migrationKey = `lio_migrated_${cfg.collectionId || "default"}`;
+  await browser.storage.local.set({ [migrationKey]: true });
+  await clearRecoveryIncident();
 
   await log({
     kind: "synced",
@@ -1183,7 +1195,10 @@ export async function restoreBaselineFromLocal(label = "Restore browser as basel
 
   await setWatermark(res.server_timestamp, res.server_version);
   await setKnownServerIds(verifiedNodes.map((n) => n.id));
-  await browser.storage.local.remove("recoveryRequired");
+  const cfg = await getConfig();
+  const migrationKey = `lio_migrated_${cfg.collectionId || "default"}`;
+  await browser.storage.local.set({ [migrationKey]: true });
+  await clearRecoveryIncident();
   await log({
     kind: "synced",
     title: `Restored ${res.restored} bookmarks as server baseline`,
@@ -1504,6 +1519,9 @@ export async function pushLocalOnlyNodes(): Promise<{
     if (mappingsToSave.length) {
       await setMappings(mappingsToSave);
     }
+    const migrationKey = `lio_migrated_${cfg.collectionId || "default"}`;
+    await browser.storage.local.set({ [migrationKey]: true });
+    await clearRecoveryIncident();
 
     pushed = localOnly.length;
     const parts: string[] = [];
