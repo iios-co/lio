@@ -110,7 +110,7 @@ export function PopupApp() {
   }
 
   if (!status) {
-    return <div className="w-96 p-8 text-center"><span className="pill pill-info">Loading…</span></div>;
+    return <div className="min-w-[400px] w-max max-w-[800px] p-8 text-center"><span className="pill pill-info">Loading…</span></div>;
   }
   // Not connected yet: the whole connect flow renders HERE, in the popup panel
   // hanging off the toolbar icon. There is no options page to send anyone to.
@@ -124,7 +124,7 @@ export function PopupApp() {
   const shown: View = gateClosed ? "settings" : view;
 
   return (
-    <div className="w-96 p-4">
+    <div className="min-w-[400px] w-max max-w-[800px] p-4">
       {/* Header: wordmark + version + live dot, then TWO toggling icons. */}
       <div className="flex items-center gap-2 mb-3">
         <button onClick={toggleGlobal} className="flex items-center gap-2"

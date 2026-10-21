@@ -51,6 +51,13 @@
 
 * { box-sizing: border-box; }
 
+html, body {
+  min-width: 400px;
+  width: max-content;
+  max-width: 800px;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   color: var(--fg);

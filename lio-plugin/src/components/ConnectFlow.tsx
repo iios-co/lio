@@ -181,7 +181,7 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
 
   if (conn === "choose") {
     return (
-      <div className="w-96 p-4">
+      <div className="min-w-[400px] w-max max-w-[800px] p-4">
         <ChoosePanel
           serverLinks={serverLinks ?? 0}
           localLinks={localLinks ?? 0}
@@ -193,7 +193,7 @@ export function ConnectFlow({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="w-96 p-4 fade-up">
+    <div className="min-w-[400px] w-max max-w-[800px] p-4 fade-up">
       <div className="grid place-items-center mb-2"><Logo size={24} withWordmark={false} /></div>
       <h1 className="text-sm font-semibold text-fg mb-1 text-center">Connect a collection</h1>
       <p className="text-[11px] text-fg-subtle mb-4 text-center">
@@ -231,7 +231,7 @@ function ChoosePanel({ serverLinks, localLinks, onPick, onBack }: {
   onPick: (m: Mode) => void; onBack: () => void;
 }) {
   return (
-    <div className="fade-up">
+    <div className="fade-up max-w-[500px]">
       <button onClick={onBack} className="btn-ghost btn-sm mb-3">← Back</button>
       <h1 className="text-sm font-semibold text-fg mb-1">How should the first sync go?</h1>
       <p className="text-[11px] text-fg-subtle mb-4">
