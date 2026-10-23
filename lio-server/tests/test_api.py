@@ -401,6 +401,66 @@ def test_successive_boundaries_coalesce_near_identical_sessions(client):
     assert len(hist) == 2, f"a distinct session must be kept, got {len(hist)} rows"
     assert {h["tab_count"] for h in hist} == {20, 15}, [h["tab_count"] for h in hist]
 
+
+def test_tab_session_put_identical_skips_updated_at(client):
+    """PUTing an identical tab snapshot on a live session does not bump updated_at."""
+    session_json = json.dumps({"windows": [{"tabs": [{"title": "Docs", "url": "https://docs.lio.dev"}]}]})
+    r1 = client.put(f"{_base()}/tabs/dev-idemp", headers=AUTH, json={
+        "device_name": "Laptop",
+        "session_json": session_json,
+        "updated_at": 1000,
+    })
+    assert r1.status_code == 204
+    sessions = client.get(f"{_base()}/tabs?device_id=dev-idemp", headers=AUTH).json()["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["updated_at"] == 1000
+
+    # Same content, different timestamp: should be a no-op
+    r2 = client.put(f"{_base()}/tabs/dev-idemp", headers=AUTH, json={
+        "device_name": "Laptop",
+        "session_json": session_json,
+        "updated_at": 2000,
+    })
+    assert r2.status_code == 204
+    sessions = client.get(f"{_base()}/tabs?device_id=dev-idemp", headers=AUTH).json()["sessions"]
+    assert sessions[0]["updated_at"] == 1000, "updated_at must not change on identical snapshot"
+
+    # Changed content: updated_at should update
+    new_json = json.dumps({"windows": [{"tabs": [{"title": "Blog", "url": "https://blog.lio.dev"}]}]})
+    r3 = client.put(f"{_base()}/tabs/dev-idemp", headers=AUTH, json={
+        "device_name": "Laptop",
+        "session_json": new_json,
+        "updated_at": 3000,
+    })
+    assert r3.status_code == 204
+    sessions = client.get(f"{_base()}/tabs?device_id=dev-idemp", headers=AUTH).json()["sessions"]
+    assert sessions[0]["updated_at"] == 3000
+
+    # Session boundary with same content: must still process boundary
+    r4 = client.put(f"{_base()}/tabs/dev-idemp", headers=AUTH, json={
+        "device_name": "Laptop",
+        "session_json": new_json,
+        "updated_at": 4000,
+        "session_boundary": True,
+    })
+    assert r4.status_code == 204
+    sessions = client.get(f"{_base()}/tabs?device_id=dev-idemp", headers=AUTH).json()["sessions"]
+    assert sessions[0]["updated_at"] == 4000
+
+
+def test_tab_sessions_sorted_deterministic_tie_breaker(client):
+    """Sessions with identical updated_at are ordered deterministically by device_id ASC."""
+    snap = json.dumps({"windows": [{"tabs": [{"url": "https://example.com"}]}]})
+    client.put(f"{_base()}/tabs/dev-z", headers=AUTH, json={
+        "device_name": "Device Z", "session_json": snap, "updated_at": 5000,
+    })
+    client.put(f"{_base()}/tabs/dev-a", headers=AUTH, json={
+        "device_name": "Device A", "session_json": snap, "updated_at": 5000,
+    })
+    res = client.get(f"{_base()}/tabs", headers=AUTH).json()["sessions"]
+    dev_ids = [s["device_id"] for s in res if s["device_id"] in ("dev-z", "dev-a")]
+    assert dev_ids == ["dev-a", "dev-z"], f"Expected ['dev-a', 'dev-z'] on timestamp tie, got {dev_ids}"
+
 def test_delta_delete_removes_node(client):
     client.post(
         f"{_base()}/bookmarks/delta",

@@ -12,7 +12,7 @@ import {
 import {
   diffTrees, describeDiff, linkCount, localNodes, folderNodes, serverNodes, type LeafRef,
 } from "@/lib/reconcile";
-import { scheduleTabSync, pushNow, markSessionBoundary, adoptSession, restoreHistorySession, localTabs, lastTabPush, compareTabsWithServer } from "@/lib/tabs";
+import { scheduleTabSync, pushNow, markSessionBoundary, resetTabPushCache, adoptSession, restoreHistorySession, localTabs, lastTabPush, compareTabsWithServer } from "@/lib/tabs";
 import { recordVisit, flushVisits, invalidateVisitIndex } from "@/lib/visits";
 import { size as queueSize, clear as clearQueue } from "@/lib/queue";
 import { getLog, clearLog, log } from "@/lib/log";
@@ -128,7 +128,6 @@ export default defineBackground(() => {
           }
           step = "visits";
           await flushVisits();
-          scheduleTabSync();
           await browser.storage.local.set({ lastSyncOkAt: Date.now(), lastSyncError: null });
           reconnecting = false;
         } catch (e) {
@@ -488,6 +487,7 @@ export default defineBackground(() => {
             await checkGate(true);
             invalidateScopeCache();
             invalidateVisitIndex();
+            resetTabPushCache();
             pushService.stop();
             pushService.start(async () => {
               await runSync();

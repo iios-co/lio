@@ -36,9 +36,17 @@ async function buildSnapshot(): Promise<SnapWindow[]> {
 // session, then the flag clears. A session is archived because it ended, never
 // because a tab closed.
 let pendingSessionBoundary = false;
+let lastPushedJson: string | null = null;
+let lastPushedDeviceName: string | null = null;
+
+export function resetTabPushCache(): void {
+  lastPushedJson = null;
+  lastPushedDeviceName = null;
+}
 
 export function markSessionBoundary(): void {
   pendingSessionBoundary = true;
+  lastPushedJson = null;
 }
 
 export async function pushNow(): Promise<void> {
@@ -53,21 +61,41 @@ export async function pushNow(): Promise<void> {
   const tabCount = snapshot.reduce((n, w) => n + w.tabs.length, 0);
   if (tabCount === 0) return; // don't clobber a good snapshot during shutdown
   const boundary = pendingSessionBoundary;
+  const sessionJson = JSON.stringify(snapshot);
+  const deviceName = cfg.deviceName || "Unnamed device";
+
+  if (!lastPushedJson) {
+    const stored = await browser.storage.local.get(["lastTabSnapshot", "lastTabDeviceName"]);
+    lastPushedJson = (stored.lastTabSnapshot as string) || null;
+    lastPushedDeviceName = (stored.lastTabDeviceName as string) || null;
+  }
+
+  // Purely event-driven: if tabs and device name are unchanged, skip pushing
+  if (!boundary && sessionJson === lastPushedJson && deviceName === lastPushedDeviceName) {
+    await browser.alarms?.clear?.("tabSyncDebounce");
+    return;
+  }
+
   try {
     await api.putSession(
       cfg.deviceId,
-      cfg.deviceName || "Unnamed device",
-      JSON.stringify(snapshot),
+      deviceName,
+      sessionJson,
       Date.now(),
       boundary,
     );
     // Only clear once the push actually landed, so a failed first push does not
     // silently lose the boundary and skip archiving the previous session.
     if (boundary) pendingSessionBoundary = false;
+    lastPushedJson = sessionJson;
+    lastPushedDeviceName = deviceName;
+    await browser.alarms?.clear?.("tabSyncDebounce");
     // Record what was ACTUALLY pushed. The popup compares this against the live
     // tab count, so a local-only change can never be displayed as "synced".
     await browser.storage.local.set({
       lastTabPush: { at: Date.now(), count: tabCount },
+      lastTabSnapshot: sessionJson,
+      lastTabDeviceName: deviceName,
     });
   } catch (e) {
     console.warn("Lio: tab snapshot push failed:", (e as Error).message);

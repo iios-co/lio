@@ -36,7 +36,11 @@ export function TabsPanel({ token, query = "" }: { token: string; query?: string
         }))
         .filter((s) => s.tabs.length > 0 || (s.device_name || "").toLowerCase().includes(ql))
     : sessions;
-  const orderedSessions = [...filteredSessions].sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+  const orderedSessions = [...filteredSessions].sort((a, b) => {
+    const diff = (b.updated_at ?? 0) - (a.updated_at ?? 0);
+    if (diff !== 0) return diff;
+    return a.device_id.localeCompare(b.device_id);
+  });
 
   const filteredHistory = ql
     ? history
@@ -50,7 +54,11 @@ export function TabsPanel({ token, query = "" }: { token: string; query?: string
         }))
         .filter((h) => h.tabs.length > 0 || (h.device_name || "").toLowerCase().includes(ql))
     : history;
-  const orderedHistory = [...filteredHistory].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+  const orderedHistory = [...filteredHistory].sort((a, b) => {
+    const diff = (b.created_at ?? 0) - (a.created_at ?? 0);
+    if (diff !== 0) return diff;
+    return a.id - b.id;
+  });
 
   return (
     <div className="space-y-3">

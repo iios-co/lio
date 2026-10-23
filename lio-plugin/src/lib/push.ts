@@ -92,7 +92,7 @@ class PushService {
         try {
           const data = JSON.parse(event.data);
           if (data && typeof data === "object") {
-            if (data.event === "bookmarks_updated" || data.event === "tabs_updated") {
+            if (data.event === "bookmarks_updated") {
               // Ignore if we authored this change
               if (data.origin && data.origin === cfg.deviceId) return;
               if (this.onSync) {

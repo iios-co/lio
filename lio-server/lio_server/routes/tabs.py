@@ -101,6 +101,17 @@ def put_session(
             "SELECT device_name, session_json, updated_at, tab_count FROM device_tabs WHERE cid = ? AND device_id = ?",
             (cid, device_id),
         ).fetchone()
+
+        # If identical snapshot and device name on a live update (not a session boundary),
+        # skip rewriting updated_at and skip broadcasting an event.
+        if (
+            existing
+            and not body.session_boundary
+            and existing["device_name"] == body.device_name
+            and existing["session_json"] == body.session_json
+        ):
+            return
+
         # ARCHIVE ONLY AT A SESSION BOUNDARY.
         #
         # A past session is worth restoring because the session ENDED -- the
@@ -219,7 +230,7 @@ def list_sessions(
             """
             SELECT device_id, device_name, session_json, updated_at, tab_count
             FROM device_tabs WHERE cid = ?
-            ORDER BY updated_at DESC
+            ORDER BY updated_at DESC, device_id ASC
             """,
             (cid,),
         ).fetchall()

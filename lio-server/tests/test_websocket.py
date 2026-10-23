@@ -137,3 +137,43 @@ def test_websocket_broadcasts_on_delete_and_reorganize(client):
         assert event2["event"] == "bookmarks_updated"
         assert event2["op"] == "resync"
         assert event2["origin"] == "web-ui"
+
+
+def test_websocket_tabs_broadcast_and_idempotency(client):
+    auth_headers = {"Authorization": f"Bearer {client.token}"}
+    with client.websocket_connect(f"/api/v1/collections/{client.token}/ws?device_id=listener") as ws:
+        ws.receive_json()  # connected event
+
+        # dev1 pushes tabs -> broadcast must arrive at listener
+        r = client.put(
+            f"/api/v1/collections/{client.token}/tabs/dev1",
+            headers=auth_headers,
+            json={
+                "device_name": "Laptop",
+                "session_json": '{"tabs":[{"title":"A","url":"https://a.com"}]}',
+                "updated_at": 1000,
+            },
+        )
+        assert r.status_code == 204
+
+        event = ws.receive_json()
+        assert event["event"] == "tabs_updated"
+        assert event["origin"] == "dev1"
+        assert event["device_id"] == "dev1"
+
+        # dev1 pushes IDENTICAL tabs -> no broadcast should be sent
+        r = client.put(
+            f"/api/v1/collections/{client.token}/tabs/dev1",
+            headers=auth_headers,
+            json={
+                "device_name": "Laptop",
+                "session_json": '{"tabs":[{"title":"A","url":"https://a.com"}]}',
+                "updated_at": 2000,
+            },
+        )
+        assert r.status_code == 204
+
+        # Send ping to verify no tabs_updated was queued
+        ws.send_json({"action": "ping"})
+        msg = ws.receive_json()
+        assert msg["event"] == "pong", f"Expected pong but got {msg}"
