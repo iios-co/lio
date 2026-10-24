@@ -244,6 +244,38 @@ export function planMerge(
   return { matches, folderMatches, localOnly, serverPull, ambiguousLinks };
 }
 
+/**
+ * Interleave two ordered lists of items in round-robin priority:
+ * browser 1 1st, browser 2 1st, browser 1 2nd, browser 2 2nd, etc.
+ * Any item already emitted (e.g. because of duplicate/matched identity) is skipped.
+ */
+export function interleaveRoundRobin(b1Ids: string[], b2Ids: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  const maxLen = Math.max(b1Ids.length, b2Ids.length);
+
+  for (let r = 0; r < maxLen; r++) {
+    // Browser 1's item at rank r
+    if (r < b1Ids.length) {
+      const id1 = b1Ids[r]!;
+      if (!seen.has(id1)) {
+        seen.add(id1);
+        result.push(id1);
+      }
+    }
+    // Browser 2's item at rank r
+    if (r < b2Ids.length) {
+      const id2 = b2Ids[r]!;
+      if (!seen.has(id2)) {
+        seen.add(id2);
+        result.push(id2);
+      }
+    }
+  }
+
+  return result;
+}
+
 function depthOf(id: string, byId: Map<string, MergeNode>): number {
   let d = 0;
   let cur: string | null | undefined = byId.get(id)?.parentId ?? null;

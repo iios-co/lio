@@ -353,3 +353,81 @@ test("Firefox Profile: roots (toolbar, unfiled, menu) map canonically and match 
   assert.equal(await getLocalId("bm_tb"), "ff_1");
   assert.equal(await getLocalId("bm_menu"), "ff_2");
 });
+
+test("Two profiles merging bookmarks interleaves order round-robin (B1 1st, B2 1st, B1 2nd, B2 2nd)", async () => {
+  // Server already has Profile 1's bookmarks:
+  // pos 0: s_a ("Site A")
+  // pos 1: s_b ("Site B")
+  // pos 2: s_c ("Site C")
+  const serverNodes = [
+    { id: "1", parent_id: "0", position: 0, title: "Bookmarks bar", is_folder: true },
+    { id: "s_a", parent_id: "1", position: 0, title: "Site A", url: "https://site-a.example", is_folder: false, server_version: 1 },
+    { id: "s_b", parent_id: "1", position: 1, title: "Site B", url: "https://site-b.example", is_folder: false, server_version: 1 },
+    { id: "s_c", parent_id: "1", position: 2, title: "Site C", url: "https://site-c.example", is_folder: false, server_version: 1 },
+  ];
+  let pushedOps = [];
+  const mockServer = {
+    nodes: serverNodes,
+    server_timestamp: 1000,
+    server_version: 1,
+    pushCalls: 0,
+  };
+  api.getTree = async () => mockServer;
+  api.info = async () => ({
+    id: "col_round_robin",
+    name: "Round Robin Test",
+    bookmark_count: mockServer.nodes.filter((n) => !n.is_folder).length,
+    folder_count: mockServer.nodes.filter((n) => n.is_folder).length,
+  });
+  api.pushDelta = async (_device, ops) => {
+    mockServer.pushCalls++;
+    pushedOps = ops;
+    return { applied: ops.length, skipped_stale: 0, server_timestamp: Date.now() };
+  };
+
+  // Profile 2 has 3 local bookmarks:
+  // index 0: "Site 1"
+  // index 1: "Site 2"
+  // index 2: "Site 3"
+  const profile2 = createBrowserProfile("dev_profile_2_rr", 5000);
+  globalThis.browser = profile2.mockBrowser;
+  clearMemoryCache();
+  const { resetDetectedRoots: resetRoots } = await import("../src/lib/idMap.ts");
+  resetRoots();
+
+  profile2.bookmarks.set("l_1", { title: "Site 1", url: "https://site-1.example", parentId: "1", index: 0, isFolder: false });
+  profile2.bookmarks.set("l_2", { title: "Site 2", url: "https://site-2.example", parentId: "1", index: 1, isFolder: false });
+  profile2.bookmarks.set("l_3", { title: "Site 3", url: "https://site-3.example", parentId: "1", index: 2, isFolder: false });
+
+  await setConfig({
+    endpoint: "http://mock.server",
+    token: "tok_rr_token",
+    collectionId: "col_round_robin",
+    deviceId: profile2.deviceId,
+  });
+  await setSyncConfig({
+    globalEnabled: true,
+    pairs: [{ id: "p_everything", type: "bookmark", localFolderId: "", localFolderName: "Everything", enabled: true }],
+  });
+
+  const mergeResult = await bootstrap("merge");
+  assert.equal(mergeResult.pushed, 3, "3 local bookmarks pushed to server");
+  assert.equal(mergeResult.pulled, 3, "3 server bookmarks pulled to browser");
+
+  // Verify pushed ops indices:
+  // Merged order: [s_a (0), l_1 (1), s_b (2), l_2 (3), s_c (4), l_3 (5)]
+  const creates = pushedOps.filter((o) => o.op === "create");
+  const moves = pushedOps.filter((o) => o.op === "move");
+
+  assert.equal(creates.find((c) => c.title === "Site 1")?.index, 1);
+  assert.equal(moves.find((m) => m.node_id === "s_b")?.index, 2);
+  assert.equal(creates.find((c) => c.title === "Site 2")?.index, 3);
+  assert.equal(moves.find((m) => m.node_id === "s_c")?.index, 4);
+  assert.equal(creates.find((c) => c.title === "Site 3")?.index, 5);
+
+  // Verify local browser bookmark ordering in Profile 2:
+  const barChildren = [...profile2.bookmarks.values()].filter((b) => b.parentId === "1" && !b.isFolder);
+  barChildren.sort((a, b) => a.index - b.index);
+  const titles = barChildren.map((b) => b.title);
+  assert.deepEqual(titles, ["Site A", "Site 1", "Site B", "Site 2", "Site C", "Site 3"]);
+});

@@ -19,7 +19,7 @@ import { checkGate, resetGate } from "./gate";
 import { log } from "./log";
 import { pushService } from "./push";
 import { applyMove, clampIndex } from "./reorderPlan";
-import { planMerge, type MergeNode } from "./merge";
+import { planMerge, type MergeNode, interleaveRoundRobin } from "./merge";
 import {
   getServerId,
   getLocalId,
@@ -997,58 +997,154 @@ async function bootstrapBrowserAuthoritative(): Promise<{
     });
   }
 
-  // ---- Phase B: push ONLY genuinely local-only items to the server --------
+  // ---- Phase B: calculate round-robin interleaved positions and push to server ----
   const localToCanonical = new Map<string, string>();
-  for (const m of plan.matches) localToCanonical.set(m.localId, m.serverId);
-  for (const fm of plan.folderMatches ?? []) localToCanonical.set(fm.localId, fm.serverId);
-  for (const [sid, lid] of placed) localToCanonical.set(lid, sid);
-  if (rootsInfo.barLocalId) localToCanonical.set(rootsInfo.barLocalId, "1");
-  if (rootsInfo.otherLocalId) localToCanonical.set(rootsInfo.otherLocalId, "2");
-  if (rootsInfo.mobileLocalId) localToCanonical.set(rootsInfo.mobileLocalId, "3");
-  if (rootsInfo.menuLocalId) localToCanonical.set(rootsInfo.menuLocalId, "menu");
+  const canonicalToLocal = new Map<string, string>();
+  for (const m of plan.matches) {
+    localToCanonical.set(m.localId, m.serverId);
+    canonicalToLocal.set(m.serverId, m.localId);
+  }
+  for (const fm of plan.folderMatches ?? []) {
+    localToCanonical.set(fm.localId, fm.serverId);
+    canonicalToLocal.set(fm.serverId, fm.localId);
+  }
+  for (const [sid, lid] of placed) {
+    localToCanonical.set(lid, sid);
+    canonicalToLocal.set(sid, lid);
+  }
+  if (rootsInfo.barLocalId) {
+    localToCanonical.set(rootsInfo.barLocalId, "1");
+    canonicalToLocal.set("1", rootsInfo.barLocalId);
+  }
+  if (rootsInfo.otherLocalId) {
+    localToCanonical.set(rootsInfo.otherLocalId, "2");
+    canonicalToLocal.set("2", rootsInfo.otherLocalId);
+  }
+  if (rootsInfo.mobileLocalId) {
+    localToCanonical.set(rootsInfo.mobileLocalId, "3");
+    canonicalToLocal.set("3", rootsInfo.mobileLocalId);
+  }
+  if (rootsInfo.menuLocalId) {
+    localToCanonical.set(rootsInfo.menuLocalId, "menu");
+    canonicalToLocal.set("menu", rootsInfo.menuLocalId);
+  }
   localToCanonical.set("1", "1");
   localToCanonical.set("2", "2");
   localToCanonical.set("3", "3");
 
-  const ops: DeltaOp[] = [];
   const ts = now();
-  const localNodeMap = new Map(inScopeNodes.map((n) => [n.id, n]));
   const localMergeMap = new Map(localMerge.map((n) => [n.id, n]));
-
   const isRoot = (id: string | null | undefined): boolean => !id || rootsInfo.allRootIds.has(id);
-  for (const lid of plan.localOnly) {
-    const n = localMergeMap.get(lid);
-    if (!n) continue;
-    if (isRoot(n.id)) continue;
-    let serverId = localToCanonical.get(n.id) ?? (await getServerId(n.id).catch(() => null));
-    if (!serverId) {
-      serverId = mintServerId();
-      localToCanonical.set(n.id, serverId);
-      mappingsToSave.push({ serverId, localId: n.id });
-    }
 
-    let serverParentId: string | null = null;
-    if (n.parentId && !isRoot(n.parentId)) {
-      serverParentId = localToCanonical.get(n.parentId) ?? (await getServerId(n.parentId).catch(() => null));
-    } else if (n.parentId) {
-      serverParentId = await canonicalServerRootForLocal(n.parentId);
+  // Ensure every localOnly node has a canonical serverId minted
+  for (const lid of plan.localOnly) {
+    if (isRoot(lid)) continue;
+    let serverId = localToCanonical.get(lid);
+    if (!serverId) {
+      serverId = (await getServerId(lid).catch(() => null)) || mintServerId();
+      localToCanonical.set(lid, serverId);
+      canonicalToLocal.set(serverId, lid);
+      mappingsToSave.push({ serverId, localId: lid });
     }
-    if (!serverParentId) {
-      serverParentId = "1";
-    }
-    const realIndex = localNodeMap.get(n.id)?.index ?? 0;
-    ops.push({
-      op: "create",
-      node_id: serverId,
-      parent_id: serverParentId,
-      index: realIndex,
-      title: n.title,
-      url: n.url,
-      is_folder: n.isFolder,
-      date_added: ts,
-      timestamp: ts,
-    });
   }
+
+  // Collect all parent container IDs (both server roots and folders)
+  const parentContainerIds = new Set<string>();
+  parentContainerIds.add("1");
+  parentContainerIds.add("2");
+  parentContainerIds.add("3");
+  if (rootsInfo.menuLocalId || serverById.has("menu")) parentContainerIds.add("menu");
+  for (const s of serverRows) {
+    if (s.is_folder && !isRoot(s.id)) parentContainerIds.add(s.id);
+  }
+  for (const n of inScopeNodes) {
+    if (n.isFolder && !isRoot(n.id)) {
+      const sid = localToCanonical.get(n.id);
+      if (sid) parentContainerIds.add(sid);
+    }
+  }
+
+  const createOps: DeltaOp[] = [];
+  const moveOps: DeltaOp[] = [];
+  const localMoves: Array<{ localId: string; localParentId: string; targetIndex: number }> = [];
+
+  if (plan.localOnly.length > 0) {
+    for (const pId of parentContainerIds) {
+      // Browser 1 children under pId in position order
+      const sKids = serverRows.filter((s) => s.parent_id === pId && !isRoot(s.id));
+      sKids.sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.id.localeCompare(b.id));
+      const b1Ids = sKids.map((s) => s.id);
+
+      // Browser 2 children under corresponding local parent in index order
+      const localPId = canonicalToLocal.get(pId) ?? placed.get(pId) ?? (await localRootForServer(pId)) ?? pId;
+      const lKids = inScopeNodes.filter((n) => n.parentId === localPId && !isRoot(n.id));
+      lKids.sort((a, b) => (a.index ?? 0) - (b.index ?? 0) || a.id.localeCompare(b.id));
+      const b2Ids = lKids.map((n) => localToCanonical.get(n.id)!).filter(Boolean);
+
+      // Round-robin interleaved order: Browser 1 1st, Browser 2 1st, Browser 1 2nd, Browser 2 2nd, etc.
+      const targetOrder = interleaveRoundRobin(b1Ids, b2Ids);
+
+      for (let k = 0; k < targetOrder.length; k++) {
+        const sid = targetOrder[k]!;
+        const localId = canonicalToLocal.get(sid) ?? placed.get(sid) ?? (await getLocalId(sid).catch(() => null));
+        if (localId && !isRoot(localId)) {
+          localMoves.push({ localId, localParentId: localPId, targetIndex: k });
+        }
+
+        if (serverById.has(sid)) {
+          const cur = serverById.get(sid)!;
+          if (cur.position !== k) {
+            moveOps.push({
+              op: "move",
+              node_id: sid,
+              parent_id: pId,
+              index: k,
+              timestamp: ts,
+            });
+          }
+        } else {
+          // Node is local-only, needs op: 'create'
+          const n = localMergeMap.get(localId!);
+          if (n && !isRoot(n.id)) {
+            createOps.push({
+              op: "create",
+              node_id: sid,
+              parent_id: pId,
+              index: k,
+              title: n.title,
+              url: n.url,
+              is_folder: n.isFolder,
+              date_added: ts,
+              timestamp: ts,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Sort folder creates topologically before link creates
+  const folderDepths = new Map<string, number>();
+  const getDepth = (id: string): number => {
+    if (folderDepths.has(id)) return folderDepths.get(id)!;
+    if (isRoot(id)) return 0;
+    const n = localMergeMap.get(placed.get(id) || id);
+    if (!n || !n.parentId || isRoot(n.parentId)) {
+      folderDepths.set(id, 1);
+      return 1;
+    }
+    const d = 1 + getDepth(localToCanonical.get(n.parentId) || n.parentId);
+    folderDepths.set(id, d);
+    return d;
+  };
+
+  createOps.sort((a, b) => {
+    if (a.is_folder && !b.is_folder) return -1;
+    if (!a.is_folder && b.is_folder) return 1;
+    return getDepth(a.node_id) - getDepth(b.node_id);
+  });
+
+  const ops: DeltaOp[] = [...createOps, ...moveOps];
 
   if (ops.length) {
     const pushRes = await api.pushDelta(cfg.deviceId, ops);
@@ -1056,6 +1152,30 @@ async function bootstrapBrowserAuthoritative(): Promise<{
       throw new Error(`Merge push rejected or incomplete: applied ${pushRes?.applied ?? 0} of ${ops.length}, skipped_stale ${pushRes?.skipped_stale ?? 0}`);
     }
   }
+
+  // Align local bookmarks in Browser 2 in ascending targetIndex order
+  await withApplyGuard(async () => {
+    const byParent = new Map<string, Array<{ localId: string; targetIndex: number }>>();
+    for (const m of localMoves) {
+      const list = byParent.get(m.localParentId) ?? [];
+      list.push(m);
+      byParent.set(m.localParentId, list);
+    }
+
+    for (const [parentLid, moves] of byParent) {
+      moves.sort((a, b) => a.targetIndex - b.targetIndex);
+      for (const m of moves) {
+        await applyMove(
+          {
+            get: (id) => browser.bookmarks.get(id),
+            move: (id, dest) => browser.bookmarks.move(id, dest),
+            getChildren: (id) => browser.bookmarks.getChildren(id),
+          },
+          { nodeId: m.localId, parentId: parentLid, targetIndex: m.targetIndex }
+        ).catch(() => {});
+      }
+    }
+  });
 
   // Persist all ID mappings
   if (mappingsToSave.length) {
@@ -1073,13 +1193,13 @@ async function bootstrapBrowserAuthoritative(): Promise<{
 
   await log({
     kind: "synced",
-    title: `Merged with the server: ${plan.matches.length} matched, ${pulled} pulled in, ${ops.length} pushed, 0 removed from the server.` +
+    title: `Merged with the server: ${plan.matches.length} matched, ${pulled} pulled in, ${createOps.length} pushed, 0 removed from the server.` +
       (plan.ambiguousLinks ? ` ${plan.ambiguousLinks} duplicate-url link(s) were left as-is, not merged.` : ""),
   });
 
   return {
     pulled,
-    pushed: ops.length,
+    pushed: createOps.length,
     matched: plan.matches.length,
     ambiguous: plan.ambiguousLinks,
     removedFromServer: 0,

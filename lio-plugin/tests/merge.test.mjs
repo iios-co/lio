@@ -5,7 +5,7 @@
 //
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planMerge } from "../src/lib/merge.ts";
+import { planMerge, interleaveRoundRobin } from "../src/lib/merge.ts";
 
 // A link node.
 const link = (id, parentId, title, url) => ({
@@ -172,4 +172,22 @@ test("500 existing server links + new browser with 200 identical and 100 new lin
   assert.equal(p.serverPull.length, 300, "300 existing server links pulled into browser");
   assert.equal(server.length + p.localOnly.length, 600, "Collection size must grow to 600, not 800");
   assert.equal(local.filter((n) => !n.isFolder).length + p.serverPull.length, 600, "Browser size must grow to 600, not 800");
+});
+
+test("round-robin interleaving: browser 1 1st, browser 2 1st, browser 1 2nd, browser 2 2nd", () => {
+  const b1 = ["B1_1st", "B1_2nd", "B1_3rd"];
+  const b2 = ["B2_1st", "B2_2nd", "B2_3rd"];
+  const merged = interleaveRoundRobin(b1, b2);
+  assert.deepEqual(merged, ["B1_1st", "B2_1st", "B1_2nd", "B2_2nd", "B1_3rd", "B2_3rd"]);
+});
+
+test("round-robin interleaving with common and unequal items preserves relative priority", () => {
+  const b1 = ["Google", "YouTube", "GitHub"];
+  const b2 = ["Google", "Reddit", "Twitter"];
+  const merged = interleaveRoundRobin(b1, b2);
+  assert.deepEqual(merged, ["Google", "YouTube", "Reddit", "GitHub", "Twitter"]);
+
+  const b1Short = ["A", "B"];
+  const b2Long = ["1", "2", "3", "4"];
+  assert.deepEqual(interleaveRoundRobin(b1Short, b2Long), ["A", "1", "B", "2", "3", "4"]);
 });
