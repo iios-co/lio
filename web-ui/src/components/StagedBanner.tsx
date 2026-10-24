@@ -32,16 +32,21 @@ export function StagedBanner({
             {staged.label} — preview
           </div>
           <p className="text-[11.5px] leading-snug text-fg-muted mt-0.5">{staged.summary}</p>
-          {doomedNodes.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setExpanded(!expanded)}
-              className="text-[11px] font-medium text-fg underline hover:text-fg-bright mt-1 inline-flex items-center gap-1 cursor-pointer"
-            >
-              <span>{expanded ? "Hide" : "Show"} {doomedNodes.length} link{doomedNodes.length === 1 ? "" : "s"} to be removed</span>
-              <span className="text-[9px]">{expanded ? "▲" : "▼"}</span>
-            </button>
-          )}
+          {doomedNodes.length > 0 && (() => {
+            const hasFolders = doomedNodes.some((n) => n.is_folder);
+            const hasLinks = doomedNodes.some((n) => !n.is_folder);
+            const noun = hasFolders && hasLinks ? "item" : hasFolders ? "folder" : "link";
+            return (
+              <button
+                type="button"
+                onClick={() => setExpanded(!expanded)}
+                className="text-[11px] font-medium text-fg underline hover:text-fg-bright mt-1 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <span>{expanded ? "Hide" : "Show"} {doomedNodes.length} {noun}{doomedNodes.length === 1 ? "" : "s"} to be removed</span>
+                <span className="text-[9px]">{expanded ? "▲" : "▼"}</span>
+              </button>
+            );
+          })()}
         </div>
         <button type="button" onClick={onCancel} disabled={applying} className="btn-ghost btn-sm shrink-0">
           Cancel

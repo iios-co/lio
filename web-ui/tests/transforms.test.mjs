@@ -317,6 +317,29 @@ test("empty folders: the visible roots are never deleted even when empty", () =>
   assert.equal(res.tree.length, 2);
 });
 
+test("empty folders: removes top-level empty folders that are not browser roots", () => {
+  const tree = [
+    folder("EmptyUserFolder", []),
+    folder("NonEmptyUserFolder", [link("Site", "https://site.example/")]),
+  ];
+  const res = deleteEmptyFolders(tree);
+  assert.equal(res.removed.length, 1);
+  assert.equal(res.tree.length, 1);
+  assert.equal(res.tree[0].title, "NonEmptyUserFolder");
+});
+
+test("duplicates: merges duplicate sibling folders with identical titles", () => {
+  const bar = folder("Bookmarks Bar", [
+    folder("Work", [link("Doc1", "https://doc1.example/")]),
+    folder("Work", [link("Doc2", "https://doc2.example/")]),
+  ]);
+  const res = deleteDuplicates([bar]);
+  assert.equal(res.removed.length, 1, "the duplicate folder is removed");
+  assert.equal(res.tree[0].children.length, 1, "only 1 Work folder remains");
+  assert.equal(res.tree[0].children[0].title, "Work");
+  assert.equal(res.tree[0].children[0].children.length, 2, "both links are preserved in the survivor folder");
+});
+
 // ---- contract --------------------------------------------------------------
 
 test("every menu kind has a transform, and each names its own verb", () => {

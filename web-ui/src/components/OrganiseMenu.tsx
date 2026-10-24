@@ -29,7 +29,7 @@ const GROUPS: { title: string; actions: Action[] }[] = [
   {
     title: "Clean up",
     actions: [
-      { kind: "dedupe", label: "Delete duplicates", hint: "Same URL, visits merged", destructive: true },
+      { kind: "dedupe", label: "Delete duplicates", hint: "Same URL, visits merged; removes duplicate folders", destructive: true },
       { kind: "dead-links", label: "Delete dead links", hint: "Failed the last check", destructive: true },
       { kind: "empty-folders", label: "Delete empty folders", hint: "No links inside", destructive: true },
     ],

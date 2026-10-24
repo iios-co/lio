@@ -120,6 +120,25 @@ export interface PlacedNode {
   index: number;
 }
 
+/** True if node represents a universal browser root container that must never be removed or re-parented. */
+export function isBrowserRoot(n: TreeNode): boolean {
+  if (
+    n.node_id === "0" ||
+    n.node_id === "1" ||
+    n.node_id === "2" ||
+    n.node_id === "3" ||
+    n.node_id === "menu" ||
+    n.node_id === "toolbar_____" ||
+    n.node_id === "unfiled_____" ||
+    n.node_id === "mobile______" ||
+    n.node_id === "menu________"
+  ) {
+    return true;
+  }
+  const t = (n.title || "").trim().toLowerCase();
+  return /^(bookmarks\s*(bar|toolbar|menu)|other\s*bookmarks|unfiled\s*bookmarks|mobile\s*bookmarks)$/i.test(t);
+}
+
 /**
  * Flatten a tree into explicit (parent, index) placements — what the bulk
  * reorganize endpoint consumes.
@@ -136,13 +155,19 @@ export function toArrangement(nodes: TreeNode[]): PlacedNode[] {
   const walk = (list: TreeNode[], parentId: string | null) => {
     list.forEach((n, i) => {
       out.push({ node_id: n.node_id, parent_id: parentId, index: i });
-      if (n.children.length) walk(n.children, n.node_id);
+      if (n.children && n.children.length) walk(n.children, n.node_id);
     });
   };
+  const topNonRoots: TreeNode[] = [];
   for (const root of nodes) {
-    if (root.is_folder) walk(root.children, root.node_id);
-    // A non-folder at the top level has no children to place and must not be
-    // moved, so it is left out entirely.
+    if (isBrowserRoot(root)) {
+      if (root.is_folder) walk(root.children, root.node_id);
+    } else {
+      topNonRoots.push(root);
+    }
+  }
+  if (topNonRoots.length) {
+    walk(topNonRoots, topNonRoots[0]?.parent_id ?? null);
   }
   return out;
 }

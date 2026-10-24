@@ -48,6 +48,19 @@ const ROLE_CANONICAL_NAMES: Record<string, string> = {
   "menu": "Bookmarks menu",
 };
 
+function isRootNode(n: MergeNode, roles?: RootRoleMap): boolean {
+  if (!n.isFolder) return false;
+  if (roles && n.id in roles) return true;
+  if (n.id in ROLE_CANONICAL_NAMES) return true;
+  if (n.parentId === null || n.parentId === undefined || n.parentId === "0" || n.parentId === "root________") {
+    const title = (n.title || "").trim().toLowerCase();
+    if (/^(bookmarks\s*(bar|toolbar|menu)|other\s*bookmarks|unfiled\s*bookmarks|mobile\s*bookmarks)$/i.test(title)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function buildPaths(nodes: MergeNode[], rootRoles?: RootRoleMap): Map<string, string> {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const paths = new Map<string, string>();
@@ -63,18 +76,33 @@ function buildPaths(nodes: MergeNode[], rootRoles?: RootRoleMap): Map<string, st
     return null;
   };
 
+  if (rootRoles) {
+    for (const [id, role] of Object.entries(rootRoles)) {
+      paths.set(id, ROLE_CANONICAL_NAMES[role] ?? role);
+    }
+  }
+  for (const [id, name] of Object.entries(ROLE_CANONICAL_NAMES)) {
+    if (!paths.has(id)) paths.set(id, name);
+  }
+
   const pathOf = (id: string, depth: number): string => {
     if (paths.has(id)) return paths.get(id)!;
     if (depth > 64) return "";
+    const r = roleName(id);
+    if (r) {
+      paths.set(id, r);
+      return r;
+    }
     const n = byId.get(id);
     if (!n) return "";
     const parent = n.parentId;
-    let label = n.title?.trim() || "";
-    const isRoot = parent === null || parent === undefined || parent === "0" || parent === "root________" || !byId.has(parent);
-    if (isRoot) {
-      label = roleName(id) || label || id;
+    const isTopRoot = parent === null || parent === undefined || parent === "0" || parent === "root________";
+    let label = n.title?.trim() || id;
+    if (isTopRoot) {
+      paths.set(id, label);
+      return label;
     }
-    const p = parent && parent !== "0" && parent !== "root________" && byId.has(parent) ? pathOf(parent, depth + 1) : "";
+    const p = parent && parent !== "0" && parent !== "root________" ? pathOf(parent, depth + 1) : "";
     const full = p ? `${p}/${label}` : label;
     paths.set(id, full);
     return full;
@@ -148,8 +176,8 @@ export function planMerge(
   let ambiguousLinks = 0;
 
   // 1. Explicit folder matching by normalized full path
-  const localFolders = local.filter((n) => n.isFolder);
-  const serverFolders = server.filter((n) => n.isFolder);
+  const localFolders = local.filter((n) => n.isFolder && !isRootNode(n, localRootRoles));
+  const serverFolders = server.filter((n) => n.isFolder && !isRootNode(n, serverRootRoles));
 
   const localFoldersByPath = new Map<string, MergeNode[]>();
   for (const f of localFolders) {
@@ -205,11 +233,11 @@ export function planMerge(
     ids.slice().sort((a, b) => depthOf(a, byId) - depthOf(b, byId));
 
   const localOnly = byDepth(
-    local.filter((n) => !matchedLocal.has(n.id)).map((n) => n.id),
+    local.filter((n) => !matchedLocal.has(n.id) && !isRootNode(n, localRootRoles)).map((n) => n.id),
     localById
   );
   const serverPull = byDepth(
-    server.filter((n) => !matchedServer.has(n.id)).map((n) => n.id),
+    server.filter((n) => !matchedServer.has(n.id) && !isRootNode(n, serverRootRoles)).map((n) => n.id),
     serverById
   );
 

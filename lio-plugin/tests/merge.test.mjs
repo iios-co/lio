@@ -147,3 +147,29 @@ test("empty trees produce an empty plan", () => {
   assert.equal(p.localOnly.length, 0);
   assert.equal(p.serverPull.length, 0);
 });
+
+test("500 existing server links + new browser with 200 identical and 100 new links merges to 600", () => {
+  // Server has 500 links parented under "1" (server DB never stores row for "1" itself).
+  // Fresh browser tree includes the Bookmarks bar folder node "1", 200 identical links, and 100 new links.
+  const server = [];
+  for (let i = 0; i < 500; i++) {
+    server.push(link(`s_${i}`, "1", `Link ${i}`, `https://example.com/${i}`));
+  }
+
+  const local = [
+    folder("1", "0", "Bookmarks bar"),
+  ];
+  for (let i = 0; i < 200; i++) {
+    local.push(link(`l_${i}`, "1", `Link ${i}`, `https://example.com/${i}`));
+  }
+  for (let i = 500; i < 600; i++) {
+    local.push(link(`l_${i}`, "1", `Link ${i}`, `https://example.com/${i}`));
+  }
+
+  const p = planMerge(local, server, { "1": "1" });
+  assert.equal(p.matches.length, 200, "200 identical links match");
+  assert.equal(p.localOnly.length, 100, "100 new links pushed from browser");
+  assert.equal(p.serverPull.length, 300, "300 existing server links pulled into browser");
+  assert.equal(server.length + p.localOnly.length, 600, "Collection size must grow to 600, not 800");
+  assert.equal(local.filter((n) => !n.isFolder).length + p.serverPull.length, 600, "Browser size must grow to 600, not 800");
+});

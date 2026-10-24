@@ -12,6 +12,7 @@ import {
   cloneTree,
   countLeaves,
   descendantLeaves,
+  isBrowserRoot,
   type NewFolder,
   type TreeNode,
 } from "./tree";
@@ -392,19 +393,54 @@ function allLeaves(nodes: TreeNode[]): TreeNode[] {
   return out;
 }
 
+/** Merge duplicate sibling folders with identical normalized titles under the same parent. */
+function mergeDuplicateFolders(nodes: TreeNode[], doomed: Set<string>): TreeNode[] {
+  const byTitle = new Map<string, TreeNode>();
+  const out: TreeNode[] = [];
+
+  for (const n of nodes) {
+    if (!n.is_folder || isBrowserRoot(n)) {
+      if (n.is_folder) {
+        out.push({ ...n, children: mergeDuplicateFolders(n.children, doomed) });
+      } else {
+        out.push(n);
+      }
+      continue;
+    }
+
+    const key = (n.title || "").trim().toLowerCase();
+    const existing = byTitle.get(key);
+    if (!existing) {
+      const merged = { ...n, children: mergeDuplicateFolders(n.children, doomed) };
+      byTitle.set(key, merged);
+      out.push(merged);
+    } else {
+      doomed.add(n.node_id);
+      const reparentedKids = n.children.map((c) => ({ ...c, parent_id: existing.node_id }));
+      existing.children.push(...reparentedKids);
+      existing.children = mergeDuplicateFolders(existing.children, doomed);
+    }
+  }
+
+  return out;
+}
+
 /**
- * Delete exact duplicates: same normalised URL. Which copy survives does not
- * matter — they point at the same page — so the first in tree order is kept and
- * the rest are dropped. The survivor ABSORBS the others' visit counts, so
- * de-duplicating never silently loses usage history (the server performs the
- * merge, and undo restores both the nodes and the original counts).
+ * Delete exact duplicates: same normalised URL and duplicate sibling folders.
+ * Which copy survives does not matter — they point at the same page — so the
+ * first in tree order is kept and the rest are dropped. The survivor ABSORBS
+ * the others' visit counts, so de-duplicating never silently loses usage
+ * history (the server performs the merge, and undo restores both the nodes and
+ * the original counts). Sibling folders with identical names have their contents
+ * merged into one folder.
  */
 export function deleteDuplicates(tree: TreeNode[]): TransformResult {
-  const seen = new Map<string, TreeNode>();
   const doomed = new Set<string>();
+  const mergedTree = mergeDuplicateFolders(tree, doomed);
+  const seen = new Map<string, TreeNode>();
   const mergeMap = new Map<string, string[]>();
 
-  for (const leaf of allLeaves(tree)) {
+  for (const leaf of allLeaves(mergedTree)) {
     const key = normalizedUrl(leaf.url);
     if (!key) continue;
     const first = seen.get(key);
@@ -418,20 +454,37 @@ export function deleteDuplicates(tree: TreeNode[]): TransformResult {
     mergeMap.set(first.node_id, list);
   }
 
-  const n = doomed.size;
+  const allInitialLeaves = new Set(allLeaves(tree).map((l) => l.node_id));
+  const duplicateLinksCount = [...doomed].filter((id) => allInitialLeaves.has(id)).length;
+  const duplicateFoldersCount = doomed.size - duplicateLinksCount;
   const groups = mergeMap.size;
+
+  let summary = "No duplicate URLs found.";
+  if (duplicateLinksCount > 0 && duplicateFoldersCount > 0) {
+    summary =
+      `Removes ${duplicateLinksCount} duplicate link${duplicateLinksCount === 1 ? "" : "s"} across ${groups} URL${groups === 1 ? "" : "s"}` +
+      ` and merges ${duplicateFoldersCount} duplicate folder${duplicateFoldersCount === 1 ? "" : "s"}. ` +
+      `One copy of each is kept — they point at the same page, so it does not matter which — and its visit count ` +
+      `absorbs the copies', so no usage history is lost. Undo restores them.`;
+  } else if (duplicateLinksCount > 0) {
+    summary =
+      `Removes ${duplicateLinksCount} duplicate link${duplicateLinksCount === 1 ? "" : "s"} across ${groups} URL${groups === 1 ? "" : "s"}. ` +
+      `One copy of each is kept — they point at the same page, so it does not matter which — and its visit count ` +
+      `absorbs the copies', so no usage history is lost. Undo restores them.`;
+  } else if (duplicateFoldersCount > 0) {
+    summary =
+      `Merges ${duplicateFoldersCount} duplicate folder${duplicateFoldersCount === 1 ? "" : "s"}. ` +
+      `Contents are merged into matching folders. Undo restores them.`;
+  }
+
   return {
     kind: "dedupe",
     label: "Delete duplicates",
-    summary: n
-      ? `Removes ${n} duplicate link${n === 1 ? "" : "s"} across ${groups} URL${groups === 1 ? "" : "s"}. ` +
-        `One copy of each is kept — they point at the same page, so it does not matter which — and its visit count ` +
-        `absorbs the copies', so no usage history is lost. Undo restores them.`
-      : "No duplicate URLs found.",
-    tree: pruneIds(tree, doomed),
+    summary,
+    tree: pruneIds(mergedTree, doomed),
     removed: [...doomed],
     mergeVisits: [...mergeMap.entries()].map(([survivor, absorbed]) => ({ survivor, absorbed })),
-    noop: n === 0,
+    noop: doomed.size === 0,
     destructive: true,
     verb: "Delete",
   };
@@ -481,13 +534,12 @@ export function deleteDeadLinks(tree: TreeNode[]): TransformResult {
  */
 export function deleteEmptyFolders(tree: TreeNode[]): TransformResult {
   const doomed = new Set<string>();
-  const rootIds = new Set(tree.map((r) => r.node_id));
 
   const walk = (nodes: TreeNode[]) => {
     for (const n of nodes) {
       if (!n.is_folder) continue;
       walk(n.children);
-      if (!rootIds.has(n.node_id) && countLeaves(n) === 0) doomed.add(n.node_id);
+      if (!isBrowserRoot(n) && countLeaves(n) === 0) doomed.add(n.node_id);
     }
   };
   walk(tree);
