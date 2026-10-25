@@ -181,15 +181,18 @@ def test_update_bookmark_endpoint(client):
     assert len(update_ops) >= 2
     assert update_ops[-1]["origin"] == "web-ui"
 
-    # 5. Validation errors
+    # 5. Validation errors and empty title handling
     # Empty body
     assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={}).status_code == 400
-    # Explicit null values
-    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": None}).status_code == 400
+    # Blank/empty title is allowed (browsers support bookmarks with empty titles)
+    r_empty = client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": ""})
+    assert r_empty.status_code == 200
+    assert r_empty.json()["title"] == ""
+    r_blank = client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": "   "})
+    assert r_blank.status_code == 200
+    assert r_blank.json()["title"] == ""
+    # Explicit null URL
     assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": None}).status_code == 400
-    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": None, "url": None}).status_code == 400
-    # Blank title
-    assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"title": "   "}).status_code == 400
     # Blank URL
     assert client.patch(f"{_base()}/bookmarks/bm_1", headers=AUTH, json={"url": "   "}).status_code == 400
     # Invalid URL scheme (e.g. javascript:, file:, data:)

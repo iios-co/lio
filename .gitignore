@@ -28,6 +28,8 @@ release/
 .ruff_cache/
 
 # OS artifacts
+*.dmg
+.DS_Store
 .DS_Store
 Thumbs.db
 

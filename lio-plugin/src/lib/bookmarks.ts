@@ -392,7 +392,6 @@ export function onCreated(id: string, node: BNode): void {
       iconBase64: await faviconFor(node.url),
     });
     await dispatch(op);
-    await pushSiblingOrder([node.parentId]);
   });
 }
 
@@ -465,7 +464,6 @@ export function onMoved(
       } else {
         await createSubtree(existing as BNodeLike);
       }
-      await pushSiblingOrder([moveInfo.parentId]);
       return;
     }
 
@@ -476,7 +474,6 @@ export function onMoved(
         const op = await createSyncOp(serverId, "delete", {});
         await dispatch(op);
       }
-      await pushSiblingOrder([moveInfo.oldParentId]);
       return;
     }
 
@@ -489,7 +486,6 @@ export function onMoved(
         index: moveInfo.index ?? 0,
       });
       await dispatch(op);
-      await pushSiblingOrder([moveInfo.parentId, moveInfo.oldParentId]);
     }
   });
 }
@@ -504,7 +500,6 @@ export function onRemoved(id: string, removeInfo?: { parentId?: string }): void 
       const op = await createSyncOp(serverId, "delete", {});
       await dispatch(op);
     }
-    await pushSiblingOrder([removeInfo?.parentId]);
   });
 }
 
@@ -1514,7 +1509,7 @@ export async function pushLocalOnlyNodes(): Promise<{
       if (parentDiffers || positionDiffers) {
         const rowVersion = s.server_version ?? 0;
         const seenVersion = cfg.lastServerVersion || 0;
-        if (rowVersion > seenVersion) {
+        if (rowVersion >= seenVersion) {
           const targetLocalParent = serverParent ? (await getLocalId(serverParent).catch(() => null)) : null;
           if (serverParent && !targetLocalParent) {
             throw new Error(`Cannot apply server placement for ${n.id}: server parent ${serverParent} not resolved locally`);
@@ -1548,8 +1543,18 @@ export async function pushLocalOnlyNodes(): Promise<{
     serverMoves.sort((a, b) => a.depth - b.depth);
     await withApplyGuard(async () => {
       for (const m of serverMoves) {
-        const ok = await browser.bookmarks
-          .move(m.id, { parentId: m.parentId ?? undefined, index: m.index })
+        const ok = await applyMove(
+          {
+            get: (id) => browser.bookmarks.get(id),
+            move: (id, dest) => browser.bookmarks.move(id, dest),
+            getChildren: (id) => browser.bookmarks.getChildren(id),
+          },
+          {
+            nodeId: m.id,
+            parentId: m.parentId ?? undefined,
+            targetIndex: m.index,
+          }
+        )
           .then(() => true)
           .catch((e) => {
             console.warn(`Lio: could not apply server placement for ${m.id}:`, (e as Error).message);

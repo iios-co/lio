@@ -542,3 +542,66 @@ def test_a_move_from_a_current_client_is_still_applied(client):
     assert rows["lB"]["position"] == 0, (
         f"an up-to-date client's move must be applied, got position {rows['lB']['position']}"
     )
+    assert rows["lA"]["position"] == 1, (
+        f"sibling lA must be shifted to position 1, got position {rows['lA']['position']}"
+    )
+
+
+def test_sync_move_updates_sort_key_and_sibling_positions(client):
+    """Moving a bookmark via /sync atomically updates sort_key, renumbers siblings,
+    and updates server_version on shifted rows."""
+    r = client.post(
+        f"{_base()}/sync",
+        json={
+            "clientId": "devA",
+            "lastServerVersion": 0,
+            "operations": [
+                {
+                    "operationId": f"devA:seed:{nid}",
+                    "clientId": "devA",
+                    "clientSequence": n,
+                    "itemId": nid,
+                    "operation": "create",
+                    "changes": {"parentId": "bar", "index": idx, "title": nid, "url": f"https://{nid}.example"},
+                    "lastServerVersion": 0,
+                }
+                for n, (nid, idx) in enumerate([("b0", 0), ("b1", 1), ("b2", 2)], start=1)
+            ],
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    v1 = r.json()["currentServerVersion"]
+
+    # Move b2 from index 2 to index 0
+    r_move = client.post(
+        f"{_base()}/sync",
+        json={
+            "clientId": "devA",
+            "lastServerVersion": v1,
+            "operations": [
+                {
+                    "operationId": "devA:move:b2",
+                    "clientId": "devA",
+                    "clientSequence": 10,
+                    "itemId": "b2",
+                    "operation": "move",
+                    "changes": {"parentId": "bar", "index": 0},
+                    "lastServerVersion": v1,
+                }
+            ],
+        },
+        headers=AUTH,
+    )
+    assert r_move.status_code == 200
+
+    rows = _tree_rows(client)
+    assert rows["b2"]["position"] == 0
+    assert rows["b0"]["position"] == 1
+    assert rows["b1"]["position"] == 2
+
+    # Usage report sorted by custom (sort_key) reflects the new order
+    rep = client.get(f"/api/v1/collections/{TOKEN}/report/usage?sort=custom&dir=asc", headers=AUTH).json()
+    rep_ids = [row["node_id"] for row in rep["rows"]]
+    assert rep_ids == ["b2", "b0", "b1"]
+

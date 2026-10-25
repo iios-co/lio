@@ -111,7 +111,8 @@ export function TreeView({ nodes, token, query = "", frozen = false }: {
 
     // Otherwise become a sibling of the target, at the target's slot.
     const parentId = target.parent_id ?? null;
-    const siblings = parentId ? (byId.get(parentId)?.children ?? []) : tree;
+    const parentNode = parentId ? byId.get(parentId) : undefined;
+    const siblings = parentNode ? (parentNode.children ?? []) : tree;
     const idx = siblings.findIndex((n) => n.node_id === overId);
     move.mutate({ nodeId: activeId, parentId, index: idx < 0 ? 0 : idx });
   }
@@ -249,11 +250,7 @@ function Row({
   const commitTitle = async () => {
     if (savingRef.current) return;
     const val = draftTitle.trim();
-    if (!val) {
-      setEditError("Title cannot be empty");
-      return;
-    }
-    if (val === node.title) {
+    if (val === (node.title || "")) {
       setEditingField(null);
       return;
     }
@@ -369,6 +366,7 @@ function Row({
                     ref={titleInputRef}
                     value={draftTitle}
                     disabled={saving}
+                    placeholder="Bookmark title (optional)"
                     onChange={(e) => { setDraftTitle(e.target.value); setEditError(""); }}
                     onBlur={() => { if (!saving) void commitTitle(); }}
                     onKeyDown={(e) => {
@@ -410,7 +408,6 @@ function Row({
                 <button
                   type="button"
                   disabled={locked}
-                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
                     if (!locked) {
@@ -421,13 +418,12 @@ function Row({
                   title={locked ? undefined : "Click to edit title"}
                   className="text-sm font-medium text-fg hover:text-blue transition-colors truncate text-left disabled:hover:text-fg"
                 >
-                  {node.title || node.url || "Untitled"}
+                  {node.title ? node.title : <span className="text-fg-subtle italic">(no title)</span>}
                 </button>
                 {node.url && (
                   <button
                     type="button"
                     disabled={locked}
-                    onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (!locked) {

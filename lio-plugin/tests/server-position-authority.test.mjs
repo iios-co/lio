@@ -188,3 +188,25 @@ test("an agreeing tree produces no moves in either direction", async () => {
   assert.deepEqual(pushedOps.filter((o) => o.op === "move"), [],
     "and nothing pushed up either");
 });
+
+test("a server rearrangement at the current watermark is applied locally and not reverted", async () => {
+  // Server order: Gamma, Alpha, Beta. All updated at server_version 50 (current watermark).
+  serverRows = [
+    { id: "1",  parent_id: "0", position: 0, title: "Bookmarks bar", url: null, is_folder: true, server_version: 5 },
+    { id: "fC", parent_id: "1", position: 0, title: "Gamma", url: null, is_folder: true, server_version: 50 },
+    { id: "fA", parent_id: "1", position: 1, title: "Alpha", url: null, is_folder: true, server_version: 50 },
+    { id: "fB", parent_id: "1", position: 2, title: "Beta",  url: null, is_folder: true, server_version: 50 },
+  ];
+  await resetAll({ lastServerVersion: 50 });
+
+  await pushLocalOnlyNodes();
+
+  const pushedMoves = pushedOps.filter((o) => o.op === "move").map((o) => o.node_id);
+  assert.deepEqual(pushedMoves, [], (
+    "the browser must not push its stale order back up on equal watermark"
+  ));
+
+  assert.deepEqual(nodes.get("1").children, ["fC", "fA", "fB"],
+    "the local tree must end up in the server's order");
+});
+

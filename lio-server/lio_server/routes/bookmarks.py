@@ -125,7 +125,7 @@ def push_delta(
                 skipped += 1
                 continue
             existing = conn.execute(
-                "SELECT date_modified, deleted FROM bookmarks WHERE cid = ? AND id = ?",
+                "SELECT date_modified, deleted, parent_id, position FROM bookmarks WHERE cid = ? AND id = ?",
                 (cid, op.node_id),
             ).fetchone()
 
@@ -251,16 +251,40 @@ def push_delta(
                 )
                 applied += 1
             elif op.op == "move" and existing is not None:
+                old_parent_id = existing["parent_id"] if existing else None
+                parent_id = op.parent_id if op.parent_id is not None else old_parent_id
+                index = op.index if op.index is not None else (existing["position"] or 0)
+
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO bookmarks
+                            (id, cid, parent_id, position, title, url, is_folder, deleted, server_version, sort_key)
+                        VALUES (?, ?, ?, ?, '', NULL, 0, 0, 0, ?)
+                        """,
+                        (op.node_id, cid, parent_id, index, next_sort_key()),
+                    )
+
+                new_key, new_index, shifted = _apply_node_reorder(
+                    conn, cid, op.node_id, parent_id, index, old_parent_id=old_parent_id
+                )
+
+                payload = {
+                    "op": "move",
+                    "node_id": op.node_id,
+                    "parent_id": parent_id,
+                    "index": new_index,
+                    "timestamp": op.timestamp,
+                }
                 cur = conn.execute(
                     """
                     INSERT INTO delta_log (cid, op, node_id, payload_json, timestamp, origin, op_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, 'move', ?, ?, ?, ?, ?)
                     """,
                     (
                         cid,
-                        op.op,
                         op.node_id,
-                        op.model_dump_json(),
+                        json.dumps(payload),
                         op.timestamp,
                         req.device_id,
                         op_id,
@@ -268,20 +292,12 @@ def push_delta(
                 )
                 sv = int(cur.lastrowid)
                 last_written_sv = sv
-                conn.execute(
-                    """
-                    UPDATE bookmarks
-                    SET parent_id = ?, position = ?, deleted = 0, server_version = ?
-                    WHERE cid = ? AND id = ?
-                    """,
-                    (
-                        op.parent_id,
-                        op.index if op.index is not None else 0,
-                        sv,
-                        cid,
-                        op.node_id,
-                    ),
-                )
+                if shifted:
+                    placeholders = ",".join("?" for _ in shifted)
+                    conn.execute(
+                        f"UPDATE bookmarks SET server_version = ? WHERE cid = ? AND id IN ({placeholders})",
+                        (sv, cid, *shifted),
+                    )
                 applied += 1
             else:
                 dom = domain_of(op.url)
@@ -578,11 +594,27 @@ def sync_bookmarks(
                 ts = client_ts
                 parent_id = op.changes.parent_id if op.changes.parent_id is not None else (existing["parent_id"] if existing else None)
                 index = op.changes.index if op.changes.index is not None else (existing["position"] if existing else 0)
+                old_parent_id = existing["parent_id"] if existing else None
+
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO bookmarks
+                            (id, cid, parent_id, position, title, url, is_folder, deleted, server_version, sort_key)
+                        VALUES (?, ?, ?, ?, '', NULL, 0, 0, 0, ?)
+                        """,
+                        (op.item_id, cid, parent_id, index, next_sort_key()),
+                    )
+
+                new_key, new_index, shifted = _apply_node_reorder(
+                    conn, cid, op.item_id, parent_id, index, old_parent_id=old_parent_id
+                )
+
                 payload = {
                     "op": "move",
                     "node_id": op.item_id,
                     "parent_id": parent_id,
-                    "index": index,
+                    "index": new_index,
                     "timestamp": ts,
                 }
                 cur = conn.execute(
@@ -593,19 +625,12 @@ def sync_bookmarks(
                     (cid, op.item_id, json.dumps(payload), ts, req.client_id, op.operation_id, op.client_sequence),
                 )
                 sv = int(cur.lastrowid)
-                if existing is not None:
+                last_written_sv = sv
+                if shifted:
+                    placeholders = ",".join("?" for _ in shifted)
                     conn.execute(
-                        "UPDATE bookmarks SET parent_id = ?, position = ?, deleted = 0, server_version = ? WHERE cid = ? AND id = ?",
-                        (parent_id, index, sv, cid, op.item_id),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        INSERT INTO bookmarks
-                            (id, cid, parent_id, position, title, url, is_folder, deleted, server_version, sort_key)
-                        VALUES (?, ?, ?, ?, '', NULL, 0, 0, ?, ?)
-                        """,
-                        (op.item_id, cid, parent_id, index, sv, next_sort_key()),
+                        f"UPDATE bookmarks SET server_version = ? WHERE cid = ? AND id IN ({placeholders})",
+                        (sv, cid, *shifted),
                     )
                 acknowledged.append(op.operation_id)
                 applied_count += 1
@@ -929,6 +954,93 @@ def _append_sort_key(conn, cid: str, prev: str | None = None) -> str:
     return key_between(prev, None)
 
 
+def _apply_node_reorder(
+    conn: sqlite3.Connection,
+    cid: str,
+    node_id: str,
+    parent_id: str | None,
+    target_index: int,
+    old_parent_id: str | None = None,
+) -> tuple[str, int, list[str]]:
+    """Place node_id under parent_id at target_index, assigning a fractional
+    sort_key between its neighbours and renumbering the sibling group
+    contiguously so position order and sort_key order agree.
+
+    Returns (new_sort_key, new_position, list_of_shifted_node_ids).
+    """
+    sibs = conn.execute(
+        """
+        SELECT id, sort_key FROM bookmarks
+        WHERE cid = ? AND parent_id IS ? AND deleted = 0 AND id != ?
+        ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
+        """,
+        (cid, parent_id, node_id),
+    ).fetchall()
+
+    keys: list[str] = []
+    prev: str | None = None
+    for sib in sibs:
+        key = sib["sort_key"]
+        if key is None:
+            key = key_between(prev, None)
+            conn.execute(
+                "UPDATE bookmarks SET sort_key = ? WHERE cid = ? AND id = ?",
+                (key, cid, sib["id"]),
+            )
+        keys.append(key)
+        prev = key
+
+    idx = max(0, min(target_index, len(keys)))
+    before_key = keys[idx - 1] if idx > 0 else None
+    after_key = keys[idx] if idx < len(keys) else None
+    new_key = key_between(before_key, after_key)
+
+    conn.execute(
+        "UPDATE bookmarks SET sort_key = ?, parent_id = ? WHERE cid = ? AND id = ?",
+        (new_key, parent_id, cid, node_id),
+    )
+
+    ordered = conn.execute(
+        """
+        SELECT id, position FROM bookmarks
+        WHERE cid = ? AND parent_id IS ? AND deleted = 0
+        ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
+        """,
+        (cid, parent_id),
+    ).fetchall()
+
+    new_index = 0
+    shifted: list[str] = []
+    for i, sib in enumerate(ordered):
+        if sib["id"] == node_id:
+            new_index = i
+        if sib["position"] != i or sib["id"] == node_id:
+            shifted.append(sib["id"])
+        conn.execute(
+            "UPDATE bookmarks SET position = ? WHERE cid = ? AND id = ?",
+            (i, cid, sib["id"]),
+        )
+
+    if old_parent_id is not None and old_parent_id != parent_id:
+        old_ordered = conn.execute(
+            """
+            SELECT id, position FROM bookmarks
+            WHERE cid = ? AND parent_id IS ? AND deleted = 0
+            ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
+            """,
+            (cid, old_parent_id),
+        ).fetchall()
+        for i, sib in enumerate(old_ordered):
+            if sib["position"] != i:
+                shifted.append(sib["id"])
+                conn.execute(
+                    "UPDATE bookmarks SET position = ? WHERE cid = ? AND id = ?",
+                    (i, cid, sib["id"]),
+                )
+
+    return new_key, new_index, shifted
+
+
 @router.patch("/{node_id}/reorder", response_model=ReorderResponse)
 def reorder(
     node_id: str,
@@ -954,79 +1066,54 @@ def reorder(
                 detail="No such bookmark in this collection.",
             )
         parent_id = req.parent_id if req.parent_id is not None else row["parent_id"]
+        old_parent_id = row["parent_id"]
 
         if req.index is not None:
-            sibs = conn.execute(
-                """
-                SELECT id, sort_key FROM bookmarks
-                WHERE cid = ? AND parent_id IS ? AND deleted = 0 AND id != ?
-                ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
-                """,
-                (cid, parent_id, node_id),
-            ).fetchall()
-            # Backfill a real sort_key onto every sibling first, preserving the
-            # order they currently display in. With a MIX of NULL and real keys,
-            # "ORDER BY sort_key IS NULL, sort_key" sorts every keyed row ahead of
-            # every unkeyed one, so neighbour keys read off an unkeyed row are both
-            # None -- and key_between(None, None) places the node FIRST no matter
-            # which slot the drag asked for. Real neighbours make any index land
-            # where the user dropped it.
-            keys: list[str] = []
-            prev: str | None = None
-            for sib in sibs:
-                key = sib["sort_key"]
-                if key is None:
-                    key = key_between(prev, None)
-                    conn.execute(
-                        "UPDATE bookmarks SET sort_key = ? WHERE cid = ? AND id = ?",
-                        (key, cid, sib["id"]),
-                    )
-                keys.append(key)
-                prev = key
-            idx = max(0, min(req.index, len(keys)))
-            before_key = keys[idx - 1] if idx > 0 else None
-            after_key = keys[idx] if idx < len(keys) else None
-            new_key = key_between(before_key, after_key)
+            new_key, new_index, shifted = _apply_node_reorder(
+                conn, cid, node_id, parent_id, req.index, old_parent_id=old_parent_id
+            )
         else:
             new_key = req.sort_key if req.sort_key is not None else key_between(req.before, req.after)
-
-        conn.execute(
-            "UPDATE bookmarks SET sort_key = ?, parent_id = ? WHERE cid = ? AND id = ?",
-            (new_key, parent_id, cid, node_id),
-        )
-
-        # Renumber the WHOLE sibling group from sort_key order. Writing only the
-        # moved node's position left every other sibling stale, so one drag
-        # produced duplicate positions (observed live: 0, 0, 1). `position` is the
-        # only order the extension ever sees -- /bookmarks/tree does not return
-        # sort_key -- so an ambiguous position cannot propagate a reorder at all.
-        ordered = conn.execute(
-            """
-            SELECT id, position FROM bookmarks
-            WHERE cid = ? AND parent_id IS ? AND deleted = 0
-            ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
-            """,
-            (cid, parent_id),
-        ).fetchall()
-        new_index = 0
-        # Rows whose `position` actually changes. A reorder shifts SIBLINGS too:
-        # dropping one row at index 1 renumbers everything after it. Those shifts
-        # are real server-authored changes, so they must carry a fresh
-        # `server_version` -- otherwise a client compares its own (different)
-        # position against a row whose watermark looks OLD, concludes "the server
-        # has already shown me this row, so my difference is a local edit", and
-        # pushes its stale order back up. That is exactly how a server reorder was
-        # undone when the browser had also reordered something.
-        shifted: list[str] = []
-        for i, sib in enumerate(ordered):
-            if sib["id"] == node_id:
-                new_index = i
-            if sib["position"] != i or sib["id"] == node_id:
-                shifted.append(sib["id"])
             conn.execute(
-                "UPDATE bookmarks SET position = ? WHERE cid = ? AND id = ?",
-                (i, cid, sib["id"]),
+                "UPDATE bookmarks SET sort_key = ?, parent_id = ? WHERE cid = ? AND id = ?",
+                (new_key, parent_id, cid, node_id),
             )
+            ordered = conn.execute(
+                """
+                SELECT id, position FROM bookmarks
+                WHERE cid = ? AND parent_id IS ? AND deleted = 0
+                ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
+                """,
+                (cid, parent_id),
+            ).fetchall()
+            new_index = 0
+            shifted = []
+            for i, sib in enumerate(ordered):
+                if sib["id"] == node_id:
+                    new_index = i
+                if sib["position"] != i or sib["id"] == node_id:
+                    shifted.append(sib["id"])
+                conn.execute(
+                    "UPDATE bookmarks SET position = ? WHERE cid = ? AND id = ?",
+                    (i, cid, sib["id"]),
+                )
+            if old_parent_id is not None and old_parent_id != parent_id:
+                old_ordered = conn.execute(
+                    """
+                    SELECT id, position FROM bookmarks
+                    WHERE cid = ? AND parent_id IS ? AND deleted = 0
+                    ORDER BY sort_key IS NULL, sort_key ASC, position ASC, id ASC
+                    """,
+                    (cid, old_parent_id),
+                ).fetchall()
+                for i, sib in enumerate(old_ordered):
+                    if sib["position"] != i:
+                        shifted.append(sib["id"])
+                        conn.execute(
+                            "UPDATE bookmarks SET position = ? WHERE cid = ? AND id = ?",
+                            (i, cid, sib["id"]),
+                        )
+
         move_payload = {
             "node_id": node_id,
             "parent_id": parent_id,
@@ -1077,11 +1164,8 @@ def update_node(
         )
 
     if "title" in req.model_fields_set:
-        if req.title is None or not req.title.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Title cannot be empty.",
-            )
+        # Browser bookmarks support empty titles (e.g. icon-only bookmarks).
+        pass
 
     if "url" in req.model_fields_set:
         if req.url is None or not req.url.strip():
@@ -1113,7 +1197,7 @@ def update_node(
                 detail="Only bookmark links can be edited.",
             )
 
-        new_title = req.title.strip() if "title" in req.model_fields_set else row["title"]
+        new_title = req.title.strip() if (req.title and req.title.strip()) else "" if "title" in req.model_fields_set else row["title"]
         new_url = req.url.strip() if "url" in req.model_fields_set else row["url"]
         new_domain = domain_of(new_url) if new_url else None
         ts = _now_ms()
