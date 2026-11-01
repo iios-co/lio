@@ -393,6 +393,7 @@ VERSION=$(node -p "require('./lio-plugin/package.json').version")
 
 **Release Invariants Enforced by `deploy.sh`**:
 1. **Tag Validation**: Requires `vX.Y.Z` format matching `lio-plugin/package.json` exactly.
+   - **Release Notes Gate**: Requires a committed, non-empty `release-notes/vX.Y.Z.md` containing `## Summary`, `## Changes`, and `## Upgrade notes` (format in `AGENTS.md`). Checked before any side effect.
 2. **Remote Origin Setup**: Sets or updates `origin` to `https://github.com/iios-co/lio.git`.
 3. **Tag Collision Prevention**: Fetches remote tags and halts if `vX.Y.Z` already exists on GitHub.
 4. **Prerequisite Check**: Validates `gh` CLI presence, GitHub authentication, and CRX signing key availability.
@@ -406,7 +407,12 @@ VERSION=$(node -p "require('./lio-plugin/package.json').version")
    - `release/lio-extension.xpi`
 9. **Asset Integrity Check**: Asserts all 4 release files are present and non-empty.
 10. **Git Push & Tag**: Pushes the active branch, tags `vX.Y.Z`, and pushes the tag to GitHub.
-11. **GitHub Release Publication**: Executes `gh release create "v${VERSION}" release/*` and verifies the published release view.
+11. **GitHub Release Publication**: Builds the release body with `scripts/release-notes.sh` (curated `release-notes/vX.Y.Z.md`, then every commit since the previous tag, then a compare link), runs `gh release create ... --notes-file`, and verifies the published release view.
+
+To fix the notes on an already-published release, edit its `release-notes/vX.Y.Z.md`, commit, then:
+```bash
+scripts/release-notes.sh vX.Y.Z > /tmp/notes.md && gh release edit vX.Y.Z --notes-file /tmp/notes.md
+```
 
 ### 4. Release Artifact Matrix
 
@@ -467,14 +473,15 @@ git push origin main
 git tag -a "$TAG" -m "Release $TAG"
 git push origin "$TAG"
 
-# 6. Publish release on GitHub
+# 6. Publish release on GitHub (release-notes/${TAG}.md must exist and be committed)
+scripts/release-notes.sh "$TAG" > /tmp/lio-release-notes.md
 gh release create "$TAG" \
   release/lio-extension.crx \
   release/lio-extension-chrome.zip \
   release/lio-extension-firefox.zip \
   release/lio-extension.xpi \
   --title "Lio ${TAG}" \
-  --notes "Production release of Lio with packaged browser extension bundles."
+  --notes-file /tmp/lio-release-notes.md
 
 # 7. Verify release publication
 gh release view "$TAG"

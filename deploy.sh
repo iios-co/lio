@@ -28,6 +28,16 @@ EXPECTED_TAG="v${PKG_VER}"
 if [ "$TAG" != "$EXPECTED_TAG" ]; then
   die "Tag mismatch: requested tag is '$TAG', but lio-plugin/package.json is at '$PKG_VER' (expected '$EXPECTED_TAG')"
 fi
+
+# Release notes are the GitHub release body. Checked before any side effect so a
+# release can never go out with placeholder text again.
+NOTES_FILE="release-notes/${TAG}.md"
+[ -s "$NOTES_FILE" ] || die "Missing release notes: write $NOTES_FILE (format in AGENTS.md) and commit it before releasing."
+git ls-files --error-unmatch "$NOTES_FILE" >/dev/null 2>&1 || die "$NOTES_FILE is not committed. Commit it before releasing."
+for section in '## Summary' '## Changes' '## Upgrade notes'; do
+  grep -q "^${section}\$" "$NOTES_FILE" || die "$NOTES_FILE must contain a '${section}' section."
+done
+
 log "Checking release prerequisites..."
 command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required to publish releases. Install gh first."
 gh auth status >/dev/null 2>&1 || die "GitHub CLI is not authenticated. Run 'gh auth login' before releasing."
@@ -89,6 +99,11 @@ done
 log "Packaged extension release artifacts:"
 ls -lh release/*.zip release/*.crx release/*.xpi
 
+log "Composing release notes from ${NOTES_FILE} and commit history..."
+NOTES_OUT="$(mktemp)"
+trap 'rm -f "$NOTES_OUT"' EXIT
+scripts/release-notes.sh "$TAG" > "$NOTES_OUT" || die "Could not compose release notes for ${TAG}"
+
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 log "Deploying branch '${CURRENT_BRANCH}' to ${REMOTE_URL}..."
@@ -105,7 +120,7 @@ gh release create "$TAG" \
   release/lio-extension-firefox.zip \
   release/lio-extension.xpi \
   --title "Lio ${TAG}" \
-  --notes "Production release of Lio with packaged browser extension bundles."
+  --notes-file "$NOTES_OUT"
 
 log "Verifying published GitHub Release..."
 gh release view "$TAG"
