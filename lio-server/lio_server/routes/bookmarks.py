@@ -363,6 +363,24 @@ def push_delta(
                         sv,
                     ),
                 )
+                # Insert at the requested slot: shift later siblings and key the
+                # node between its neighbours. Storing the raw index with an
+                # end-of-collection sort_key left a duplicate position, and the
+                # next renumbering (by sort_key) moved the new link to the end.
+                _, _, shifted = _apply_node_reorder(
+                    conn,
+                    cid,
+                    op.node_id,
+                    op.parent_id,
+                    op.index if op.index is not None else 0,
+                    old_parent_id=existing["parent_id"] if existing else None,
+                )
+                if shifted:
+                    placeholders = ",".join("?" for _ in shifted)
+                    conn.execute(
+                        f"UPDATE bookmarks SET server_version = ? WHERE cid = ? AND id IN ({placeholders})",
+                        (sv, cid, *shifted),
+                    )
                 if inherited:
                     del_cur = conn.execute(
                         """
@@ -767,6 +785,21 @@ def sync_bookmarks(
                         sv,
                     ),
                 )
+                # Same placement rule as a move: see push_delta.
+                _, _, shifted = _apply_node_reorder(
+                    conn,
+                    cid,
+                    op.item_id,
+                    parent_id,
+                    index,
+                    old_parent_id=existing["parent_id"] if existing else None,
+                )
+                if shifted:
+                    placeholders = ",".join("?" for _ in shifted)
+                    conn.execute(
+                        f"UPDATE bookmarks SET server_version = ? WHERE cid = ? AND id IN ({placeholders})",
+                        (sv, cid, *shifted),
+                    )
                 if inherited:
                     del_cur = conn.execute(
                         """

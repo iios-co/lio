@@ -605,3 +605,96 @@ def test_sync_move_updates_sort_key_and_sibling_positions(client):
     rep_ids = [row["node_id"] for row in rep["rows"]]
     assert rep_ids == ["b2", "b0", "b1"]
 
+
+def _sync_create(client, nid, index, seq, last_sv=0):
+    r = client.post(
+        f"{_base()}/sync",
+        json={
+            "clientId": "devA",
+            "lastServerVersion": last_sv,
+            "operations": [
+                {
+                    "operationId": f"devA:create:{nid}",
+                    "clientId": "devA",
+                    "clientSequence": seq,
+                    "itemId": nid,
+                    "operation": "create",
+                    "changes": {"parentId": "bar", "index": index, "title": nid, "url": f"https://{nid}.example"},
+                    "lastServerVersion": last_sv,
+                }
+            ],
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["currentServerVersion"]
+
+
+def _bar_order(client):
+    kids = [n for n in client.get(f"{_base()}/tree", headers=AUTH).json()["nodes"] if n["parent_id"] == "bar"]
+    kids.sort(key=lambda n: n["position"])
+    return kids
+
+
+def test_create_dropped_mid_group_lands_at_its_index(client):
+    """Dragging a URL onto the bookmarks bar between two links creates it at that
+    index. The server must insert it there -- shifting later siblings and giving it
+    a sort_key between its neighbours -- not store a duplicate position with an
+    end-of-collection sort_key, which the next renumbering turns into "last"."""
+    v = 0
+    for seq, (nid, idx) in enumerate([("b0", 0), ("b1", 1), ("b2", 2)], start=1):
+        v = _sync_create(client, nid, idx, seq, v)
+
+    v_drop = _sync_create(client, "dropped", 1, 10, v)
+
+    kids = _bar_order(client)
+    assert [n["position"] for n in kids] == [0, 1, 2, 3], kids
+    assert [n["id"] for n in kids] == ["b0", "dropped", "b1", "b2"]
+    for nid in ("dropped", "b1", "b2"):
+        row = next(n for n in kids if n["id"] == nid)
+        assert row["server_version"] > v, f"{nid} was shifted by the create but kept server_version {row['server_version']}"
+
+    rep = client.get(f"/api/v1/collections/{TOKEN}/report/usage?sort=custom&dir=asc", headers=AUTH).json()
+    assert [row["node_id"] for row in rep["rows"]] == ["b0", "dropped", "b1", "b2"], (
+        "sort_key order must agree with position, or the next reorder moves the new link to the end"
+    )
+
+    # A later reorder renumbers by sort_key; the dropped link must keep its slot.
+    r = client.post(
+        f"{_base()}/sync",
+        json={
+            "clientId": "devA",
+            "lastServerVersion": v_drop,
+            "operations": [
+                {
+                    "operationId": "devA:move:b2",
+                    "clientId": "devA",
+                    "clientSequence": 20,
+                    "itemId": "b2",
+                    "operation": "move",
+                    "changes": {"parentId": "bar", "index": 0},
+                    "lastServerVersion": v_drop,
+                }
+            ],
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 200, r.text
+    assert [n["id"] for n in _bar_order(client)] == ["b2", "b0", "dropped", "b1"]
+
+
+def test_delta_create_mid_group_lands_at_its_index(client):
+    """Same invariant on the legacy /delta push used by repair and bootstrap."""
+    ops = [
+        {"op": "create", "node_id": nid, "parent_id": "bar", "index": idx, "title": nid,
+         "url": f"https://{nid}.example", "is_folder": False, "timestamp": 1_000 + idx}
+        for nid, idx in [("b0", 0), ("b1", 1), ("b2", 2)]
+    ]
+    ops.append({"op": "create", "node_id": "dropped", "parent_id": "bar", "index": 1, "title": "dropped",
+                "url": "https://dropped.example", "is_folder": False, "timestamp": 2_000})
+    r = client.post(f"{_base()}/delta", headers=AUTH, json={"device_id": "devA", "ops": ops})
+    assert r.status_code == 200, r.text
+
+    kids = _bar_order(client)
+    assert [n["position"] for n in kids] == [0, 1, 2, 3], kids
+    assert [n["id"] for n in kids] == ["b0", "dropped", "b1", "b2"]
